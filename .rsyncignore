@@ -1,0 +1,85 @@
+# Python cache и виртуальные окружения
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Виртуальные окружения
+venv/
+.venv/
+env/
+.env/
+ENV/
+env.bak/
+venv.bak/
+
+# Логи
+logs/
+*.log
+*.log.*
+
+# База данных SQLite (будет пересоздана на сервере)
+data/channel_agent.db*
+data/*.db
+data/*.db-shm
+data/*.db-wal
+
+# Сессия UserBot (КРИТИЧНО - не перезаписывать!)
+data/userbot_session.txt
+
+# Состояние мониторинга (серверное)
+data/monitoring_state.json
+
+# Медиа файлы Telegram (большие, можно исключить для деплоя)
+data/media/
+data/photos/
+data/videos/
+data/thumbnails/
+
+# macOS системные файлы
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# IDE настройки
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Временные файлы
+tmp/
+temp/
+*.tmp
+*.bak
+*.backup
+
+# Git репозиторий (если есть)
+.git/
+.gitignore
+
+# Другие исключения
+*.pid
+core.*
+*.core

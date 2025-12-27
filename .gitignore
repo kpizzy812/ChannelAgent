@@ -1,0 +1,82 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Environment variables (secrets)
+.env
+.env.server
+.env.local
+.env.production
+
+# Data & Logs
+data/
+logs/
+*.log
+agent.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Deploy Panel (local development only)
+deploy_panel/
+
+# Test files (temporary)
+test_*.py
+
+# Telethon session files
+*.session
+*.session-journal
+userbot_session.*
+
+# Claude Code internal files
+.claude/
+
+# Internal documentation
+CLAUDE.md
+TECHNICAL_SPECIFICATION.md
+USERBOT_SETUP.md
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+
+# pytest
+.pytest_cache/
+
+# mypy
+.mypy_cache/
