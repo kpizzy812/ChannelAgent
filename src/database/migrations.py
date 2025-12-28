@@ -422,6 +422,191 @@ class DatabaseMigrator:
             logger.error(error_msg)
             raise DatabaseMigrationError("v4", error_msg)
     
+    async def run_migration_v5(self) -> None:
+        """Миграция версии 5 - добавление таблицы custom_emojis для Premium эмодзи"""
+        logger.info("Выполняется миграция v5: таблица custom_emojis")
+
+        try:
+            async with get_db_transaction() as conn:
+                # Создаем таблицу custom_emojis
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS custom_emojis (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        standard_emoji VARCHAR(20) UNIQUE NOT NULL,
+                        document_id BIGINT NOT NULL,
+                        alt_text VARCHAR(20) NOT NULL,
+                        category VARCHAR(50) DEFAULT 'general',
+                        description VARCHAR(255),
+                        is_active BOOLEAN DEFAULT TRUE,
+                        usage_count INTEGER DEFAULT 0,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME
+                    )
+                """)
+                logger.debug("Создана таблица custom_emojis")
+
+                # Создаем индексы
+                await conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_emoji_standard ON custom_emojis(standard_emoji)"
+                )
+                await conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_emoji_category ON custom_emojis(category)"
+                )
+                await conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_emoji_active ON custom_emojis(is_active)"
+                )
+                logger.debug("Созданы индексы для таблицы custom_emojis")
+
+            await self.set_version(5, "Добавлена таблица custom_emojis для Premium эмодзи")
+            logger.info("Миграция v5 выполнена успешно")
+
+        except Exception as e:
+            error_msg = f"Ошибка выполнения миграции v5: {str(e)}"
+            logger.error(error_msg)
+            raise DatabaseMigrationError("v5", error_msg)
+
+    async def run_migration_v6(self) -> None:
+        """Миграция версии 6 - добавление поля extracted_links для хранения ссылок из постов"""
+        logger.info("Выполняется миграция v6: добавление поля extracted_links")
+
+        try:
+            async with get_db_transaction() as conn:
+                # Проверяем существует ли таблица posts
+                cursor = await conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='posts'"
+                )
+                table_exists = await cursor.fetchone()
+
+                if not table_exists:
+                    logger.info("Таблица posts не существует, пропускаем миграцию v6")
+                    await self.set_version(6, "Пропущена - таблица не создана")
+                    return
+
+                # Проверяем существует ли уже поле extracted_links
+                cursor = await conn.execute("PRAGMA table_info(posts)")
+                columns = await cursor.fetchall()
+                column_names = [col[1] for col in columns]
+
+                if 'extracted_links' not in column_names:
+                    await conn.execute("ALTER TABLE posts ADD COLUMN extracted_links TEXT")
+                    logger.debug("Добавлено поле extracted_links в таблицу posts")
+                    logger.info("Поле extracted_links добавлено для хранения ссылок из постов")
+                else:
+                    logger.info("Поле extracted_links уже существует в таблице posts")
+
+            await self.set_version(6, "Добавлено поле extracted_links для хранения ссылок")
+            logger.info("Миграция v6 выполнена успешно")
+
+        except Exception as e:
+            error_msg = f"Ошибка выполнения миграции v6: {str(e)}"
+            logger.error(error_msg)
+            raise DatabaseMigrationError("v6", error_msg)
+
+    async def run_migration_v8(self) -> None:
+        """Миграция версии 8 - добавление таблицы coingecko_cache и поля retry_count"""
+        logger.info("Выполняется миграция v8: кэш CoinGecko и retry для постов")
+
+        try:
+            async with get_db_transaction() as conn:
+                # Создаем таблицу coingecko_cache для персистентного хранения данных
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS coingecko_cache (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        cache_key VARCHAR(100) UNIQUE NOT NULL,
+                        data TEXT NOT NULL,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                logger.debug("Создана таблица coingecko_cache")
+
+                # Создаем индекс для быстрого поиска
+                await conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_coingecko_cache_key ON coingecko_cache(cache_key)"
+                )
+
+                # Добавляем поле retry_count в таблицу posts для отслеживания попыток публикации
+                cursor = await conn.execute("PRAGMA table_info(posts)")
+                columns = await cursor.fetchall()
+                column_names = [col[1] for col in columns]
+
+                if 'retry_count' not in column_names:
+                    await conn.execute("ALTER TABLE posts ADD COLUMN retry_count INTEGER DEFAULT 0")
+                    logger.debug("Добавлено поле retry_count в таблицу posts")
+
+            await self.set_version(8, "Добавлен кэш CoinGecko и retry_count для постов")
+            logger.info("Миграция v8 выполнена успешно")
+
+        except Exception as e:
+            error_msg = f"Ошибка выполнения миграции v8: {str(e)}"
+            logger.error(error_msg)
+            raise DatabaseMigrationError("v8", error_msg)
+
+    async def run_migration_v7(self) -> None:
+        """Миграция версии 7 - добавление поля media_items для хранения множественных медиа (альбомов)"""
+        logger.info("Выполняется миграция v7: добавление поля media_items для альбомов")
+
+        try:
+            async with get_db_transaction() as conn:
+                # Проверяем существует ли таблица posts
+                cursor = await conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='posts'"
+                )
+                table_exists = await cursor.fetchone()
+
+                if not table_exists:
+                    logger.info("Таблица posts не существует, пропускаем миграцию v7")
+                    await self.set_version(7, "Пропущена - таблица не создана")
+                    return
+
+                # Проверяем существует ли уже поле media_items
+                cursor = await conn.execute("PRAGMA table_info(posts)")
+                columns = await cursor.fetchall()
+                column_names = [col[1] for col in columns]
+
+                if 'media_items' not in column_names:
+                    await conn.execute("ALTER TABLE posts ADD COLUMN media_items TEXT")
+                    logger.debug("Добавлено поле media_items в таблицу posts")
+                    logger.info("Поле media_items добавлено для хранения множественных медиа (альбомов)")
+
+                    # Мигрируем существующие данные: конвертируем photo_path/video_path в media_items
+                    # Для постов с photo_path
+                    await conn.execute("""
+                        UPDATE posts
+                        SET media_items = json_array(json_object(
+                            'type', 'photo',
+                            'path', photo_path,
+                            'position', 0
+                        ))
+                        WHERE photo_path IS NOT NULL
+                        AND media_items IS NULL
+                    """)
+                    logger.debug("Мигрированы существующие посты с фото в media_items")
+
+                    # Для постов с video_path (без photo_path)
+                    await conn.execute("""
+                        UPDATE posts
+                        SET media_items = json_array(json_object(
+                            'type', 'video',
+                            'path', video_path,
+                            'position', 0
+                        ))
+                        WHERE video_path IS NOT NULL
+                        AND photo_path IS NULL
+                        AND media_items IS NULL
+                    """)
+                    logger.debug("Мигрированы существующие посты с видео в media_items")
+                else:
+                    logger.info("Поле media_items уже существует в таблице posts")
+
+            await self.set_version(7, "Добавлено поле media_items для хранения альбомов")
+            logger.info("Миграция v7 выполнена успешно")
+
+        except Exception as e:
+            error_msg = f"Ошибка выполнения миграции v7: {str(e)}"
+            logger.error(error_msg)
+            raise DatabaseMigrationError("v7", error_msg)
+
     async def run_all_migrations(self) -> None:
         """Выполнить все необходимые миграции"""
         logger.info("Начало выполнения миграций БД")
@@ -439,7 +624,11 @@ class DatabaseMigrator:
                 (1, self.run_migration_v1, "Создание базовой схемы"),
                 (2, self.run_migration_v2, "Индивидуальные настройки шаблонов"),
                 (3, self.run_migration_v3, "Добавление поля photo_path для локального хранения фото"),
-                (4, self.run_migration_v4, "Добавление поддержки видео в таблицу posts")
+                (4, self.run_migration_v4, "Добавление поддержки видео в таблицу posts"),
+                (5, self.run_migration_v5, "Добавление таблицы custom_emojis для Premium эмодзи"),
+                (6, self.run_migration_v6, "Добавление поля extracted_links для ссылок из постов"),
+                (7, self.run_migration_v7, "Добавление поля media_items для хранения альбомов"),
+                (8, self.run_migration_v8, "Добавление кэша CoinGecko и retry_count для постов")
             ]
             
             for version, migration_func, description in migrations:

@@ -177,11 +177,57 @@ async def view_post_callback(callback: CallbackQuery):
             return
         
         keyboard = get_post_moderation_keyboard(post_id)
-        
+
         # Проверяем есть ли медиа у поста
         media_handler = get_media_handler()
+
+        # Проверяем наличие альбома (более 1 медиа)
+        if post.has_album:
+            try:
+                from src.bot.main import get_bot_instance
+                bot = get_bot_instance()
+
+                # Формируем подпись для альбома
+                caption = format_post_caption_for_moderation(post)
+                if len(caption) > 1024:
+                    caption = f"📎 {bold(f'Альбом #{post.id}')} ({post.album_count} медиа)\n📄 Текст слишком длинный"
+
+                # Получаем media_group
+                media_group = media_handler.get_media_group_for_send(post, caption, get_parse_mode())
+
+                if len(media_group) >= 2:
+                    # Отправляем альбом
+                    await bot.send_media_group(
+                        chat_id=callback.message.chat.id,
+                        media=media_group
+                    )
+
+                    # Кнопки отправляем отдельным сообщением
+                    buttons_text = f"📎 {bold(f'Альбом #{post.id}')} ({len(media_group)} медиа)\n⚡️ Выберите действие:"
+                    await bot.send_message(
+                        chat_id=callback.message.chat.id,
+                        text=buttons_text,
+                        reply_markup=keyboard,
+                        parse_mode=get_parse_mode()
+                    )
+
+                    # Удаляем старое сообщение
+                    try:
+                        await callback.message.delete()
+                    except Exception:
+                        pass
+
+                    logger.info("Альбом {} ({} медиа) отправлен на модерацию", post_id, len(media_group))
+                    return
+                else:
+                    logger.warning("Недостаточно медиа для альбома поста {}, показываем как обычный", post_id)
+
+            except Exception as album_error:
+                logger.error("Ошибка отправки альбома для поста {}: {}", post_id, str(album_error))
+                # Продолжаем с обычной логикой
+
         media_for_send, media_type = media_handler.get_media_for_send(post)
-        
+
         if media_for_send:
             # Пост с медиа - отправляем медиа с подписью
             try:
@@ -1401,38 +1447,32 @@ async def cancel_moderation_action(message: Message, state: FSMContext):
         await message.answer("❌ Произошла ошибка при отмене действия")
 
 
-async def publish_post_now(post_id: int) -> bool:
+async def publish_post_now(post_id: int, use_premium_emoji: bool = True) -> bool:
     """
     Опубликовать пост в целевом канале
-    
+
     Args:
         post_id: ID поста
-        
+        use_premium_emoji: Использовать Premium Custom Emoji через UserBot
+
     Returns:
         True если публикация успешна
     """
     try:
         post_crud = get_post_crud()
         post = await post_crud.get_post_by_id(post_id)
-        
+
         if not post:
             logger.error("Пост {} не найден для публикации", post_id)
             return False
-        
+
         config = get_config()
         target_channel_id = config.TARGET_CHANNEL_ID
-        
+
         if not target_channel_id:
             logger.error("TARGET_CHANNEL_ID не настроен")
             return False
-        
-        # Реальная публикация в канал через Bot API
-        logger.info("Публикуем пост {} в канал {}", post_id, target_channel_id)
-        
-        # Получаем экземпляр бота
-        from src.bot.main import get_bot_instance
-        bot = get_bot_instance()
-        
+
         # Текст для публикации (используем обработанный или оригинальный)
         post_text = post.processed_text or post.original_text or ""
 
@@ -1440,8 +1480,54 @@ async def publish_post_now(post_id: int) -> bool:
             logger.error("Пост {} не имеет текста для публикации", post_id)
             return False
 
-        # Добавляем футер с полезными ссылками (HTML режим)
-        post_text = add_footer_to_post(post_text, parse_mode="HTML")
+        # Пробуем опубликовать через UserBot с Premium Emoji
+        if use_premium_emoji:
+            try:
+                from src.userbot.publisher import get_userbot_publisher
+
+                publisher = await get_userbot_publisher()
+
+                if publisher and publisher.is_available:
+                    logger.info("Публикуем пост {} через UserBot с Premium Emoji", post_id)
+
+                    # Получаем пути к медиа
+                    photo_path = post.photo_path if post.has_photo else None
+                    video_path = post.video_path if post.has_video else None
+
+                    message_id = await publisher.publish_post(
+                        channel_id=target_channel_id,
+                        text=post_text,
+                        photo_path=photo_path,
+                        video_path=video_path,
+                        pin_post=post.pin_post,
+                        add_footer=True
+                    )
+
+                    if message_id:
+                        # Обновляем статус поста
+                        await post_crud.update_post_status(post_id, PostStatus.POSTED)
+                        await post_crud.update_post(post_id, posted_date=datetime.now())
+                        logger.info("Пост {} опубликован через UserBot, message_id: {}",
+                                   post_id, message_id)
+                        return True
+                    else:
+                        logger.warning("Не удалось опубликовать через UserBot, fallback на Bot API")
+                else:
+                    logger.debug("UserbotPublisher недоступен, используем Bot API")
+
+            except Exception as userbot_error:
+                logger.warning("Ошибка публикации через UserBot: {}, fallback на Bot API",
+                              str(userbot_error))
+
+        # Fallback: публикация через Bot API (без Premium Emoji)
+        logger.info("Публикуем пост {} в канал {} через Bot API", post_id, target_channel_id)
+        
+        # Получаем экземпляр бота
+        from src.bot.main import get_bot_instance
+        bot = get_bot_instance()
+
+        # Добавляем футер с полезными ссылками (HTML режим для Bot API)
+        post_text_with_footer = add_footer_to_post(post_text, parse_mode="HTML")
 
         try:
             # Публикуем в зависимости от наличия медиа
@@ -1453,29 +1539,29 @@ async def publish_post_now(post_id: int) -> bool:
                 sent_message = await bot.send_photo(
                     chat_id=target_channel_id,
                     photo=media_for_send,
-                    caption=post_text,
+                    caption=post_text_with_footer,
                     parse_mode=get_parse_mode()
                 )
-                logger.info("Фото пост {} опубликован в канал {}, message_id: {}", 
+                logger.info("Фото пост {} опубликован в канал {}, message_id: {}",
                            post_id, target_channel_id, sent_message.message_id)
             elif media_for_send and media_type == 'video':
                 # Публикуем видео с подписью
                 sent_message = await bot.send_video(
                     chat_id=target_channel_id,
                     video=media_for_send,
-                    caption=post_text,
+                    caption=post_text_with_footer,
                     parse_mode=get_parse_mode()
                 )
-                logger.info("Видео пост {} опубликован в канал {}, message_id: {}", 
+                logger.info("Видео пост {} опубликован в канал {}, message_id: {}",
                            post_id, target_channel_id, sent_message.message_id)
             else:
                 # Публикуем только текст
                 sent_message = await bot.send_message(
                     chat_id=target_channel_id,
-                    text=post_text,
+                    text=post_text_with_footer,
                     parse_mode=get_parse_mode()
                 )
-                logger.info("Текст пост {} опубликован в канал {}, message_id: {}", 
+                logger.info("Текст пост {} опубликован в канал {}, message_id: {}",
                            post_id, target_channel_id, sent_message.message_id)
             
             # Обновляем статус поста
@@ -2109,9 +2195,66 @@ async def scheduled_posts_callback(callback: CallbackQuery):
         await safe_edit_message(callback, posts_text, keyboard, get_parse_mode())
         
         logger.info("Показаны запланированные посты: {} постов", len(scheduled_posts))
-        
+
     except Exception as e:
         logger.error("Ошибка получения запланированных постов: {}", str(e))
+        await callback.answer("❌ Произошла ошибка", show_alert=True)
+
+
+@moderation_router.callback_query(F.data.regexp(r"^posts_(pending|approved|rejected|published|scheduled)_page_(\d+)$"), OwnerFilter())
+async def posts_pagination_callback(callback: CallbackQuery):
+    """Обработчик пагинации списков постов"""
+    try:
+        await callback.answer()
+
+        # Парсим статус и номер страницы из callback_data
+        # Формат: posts_{status}_page_{page_number}
+        data = callback.data
+        parts = data.split("_page_")
+        status_part = parts[0].replace("posts_", "")
+        page = int(parts[1])
+
+        # Маппинг статусов
+        status_map = {
+            "pending": PostStatus.PENDING,
+            "approved": PostStatus.APPROVED,
+            "rejected": PostStatus.REJECTED,
+            "published": PostStatus.POSTED,
+            "scheduled": PostStatus.SCHEDULED
+        }
+
+        status_titles = {
+            "pending": ("⏳", "Посты на модерации"),
+            "approved": ("✅", "Одобренные посты"),
+            "rejected": ("❌", "Отклоненные посты"),
+            "published": ("📤", "Опубликованные посты"),
+            "scheduled": ("⏰", "Запланированные посты")
+        }
+
+        post_status = status_map.get(status_part)
+        if not post_status:
+            await callback.answer("❌ Неизвестный статус", show_alert=True)
+            return
+
+        post_crud = get_post_crud()
+        posts = await post_crud.get_posts_by_status(post_status)
+
+        if not posts:
+            await callback.answer("❌ Посты не найдены", show_alert=True)
+            return
+
+        icon, title = status_titles.get(status_part, ("📄", "Посты"))
+        posts_text = f"{icon} {bold(f'{title} ({len(posts)})')}\n\n"
+        posts_text += "Выберите пост для просмотра:"
+
+        keyboard = get_posts_list_keyboard(posts, status_part, page=page)
+
+        await safe_edit_message(callback, posts_text, keyboard, get_parse_mode())
+
+        logger.info("Пагинация постов {}: страница {}", status_part, page)
+
+    except Exception as e:
+        logger.error("Ошибка пагинации постов: {}", str(e))
         await callback.answer("❌ Произошла ошибка", show_alert=True)
 
 

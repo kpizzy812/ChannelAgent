@@ -509,6 +509,93 @@ class ChannelMonitor:
             logger.error("Ошибка автоматического присоединения к каналу: {}", str(e))
             return False
 
+    async def join_all_channels(self) -> Dict[str, Any]:
+        """
+        Массовое вступление во все каналы из БД
+
+        Returns:
+            Dict с результатами: joined, failed, already_member, total
+        """
+        results = {
+            "joined": 0,
+            "failed": 0,
+            "already_member": 0,
+            "total": 0,
+            "failed_channels": []
+        }
+
+        try:
+            if not self.client or not self.client.is_connected:
+                logger.error("Клиент не подключен для вступления в каналы")
+                return results
+
+            # Получаем все каналы из БД
+            from src.database.crud.channel import get_channel_crud
+            channel_crud = get_channel_crud()
+            channels = await channel_crud.get_all_active()
+
+            results["total"] = len(channels)
+            logger.info("🔄 Начинаем вступление в {} каналов...", len(channels))
+
+            from telethon.tl.functions.channels import JoinChannelRequest
+            from telethon.errors import UserAlreadyParticipantError, ChannelPrivateError
+            import asyncio
+
+            for channel in channels:
+                try:
+                    # Пробуем получить entity по username
+                    entity = None
+
+                    if channel.username:
+                        try:
+                            entity = await self.client.client.get_entity(f"@{channel.username}")
+                        except Exception:
+                            pass
+
+                    if not entity and channel.channel_id:
+                        try:
+                            entity = await self.client.client.get_entity(channel.channel_id)
+                        except Exception:
+                            pass
+
+                    if not entity:
+                        logger.warning("❌ Не найден канал: {} ({})",
+                                     channel.username or channel.title, channel.channel_id)
+                        results["failed"] += 1
+                        results["failed_channels"].append(channel.username or str(channel.channel_id))
+                        continue
+
+                    # Пытаемся вступить
+                    try:
+                        await self.client.client(JoinChannelRequest(entity))
+                        logger.info("✅ Вступили в канал: @{}", channel.username or channel.title)
+                        results["joined"] += 1
+                    except UserAlreadyParticipantError:
+                        logger.debug("👍 Уже в канале: @{}", channel.username or channel.title)
+                        results["already_member"] += 1
+                    except ChannelPrivateError:
+                        logger.warning("🔒 Приватный канал: @{}", channel.username or channel.title)
+                        results["failed"] += 1
+                        results["failed_channels"].append(channel.username or str(channel.channel_id))
+
+                    # Небольшая задержка между вступлениями
+                    await asyncio.sleep(0.5)
+
+                except Exception as e:
+                    logger.warning("❌ Ошибка вступления в {}: {}",
+                                 channel.username or channel.channel_id, str(e))
+                    results["failed"] += 1
+                    results["failed_channels"].append(channel.username or str(channel.channel_id))
+
+            logger.info("📊 Результат вступления: joined={}, already={}, failed={}, total={}",
+                       results["joined"], results["already_member"], results["failed"], results["total"])
+
+            return results
+
+        except Exception as e:
+            logger.error("Ошибка массового вступления в каналы: {}", str(e))
+            return results
+
     async def _save_channel_info(self, entity) -> None:
         """Сохранить информацию о канале в БД"""
         try:

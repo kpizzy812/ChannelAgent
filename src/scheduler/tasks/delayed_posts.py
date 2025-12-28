@@ -101,66 +101,147 @@ async def get_posts_ready_for_publishing() -> List[Any]:
         return []
 
 
-async def publish_scheduled_post(post) -> bool:
+async def publish_scheduled_post(post, use_premium_emoji: bool = True) -> bool:
     """
     Опубликовать отложенный пост
-    
+
     Args:
         post: Объект поста для публикации
-        
+        use_premium_emoji: Использовать Premium Custom Emoji через UserBot
+
     Returns:
         True если пост опубликован успешно
     """
     try:
         config = get_config()
         target_channel_id = config.TARGET_CHANNEL_ID
-        
+
         if not target_channel_id:
             logger.error("TARGET_CHANNEL_ID не настроен")
             return False
-        
-        # Получаем экземпляр бота
-        bot = get_bot_instance()
 
         # Подготавливаем контент для публикации
         content = post.processed_text or post.original_text
 
+        if not content or not content.strip():
+            logger.error("Пост {} не имеет текста для публикации", post.id)
+            return False
+
+        # Пробуем опубликовать через UserBot с Premium Emoji
+        if use_premium_emoji:
+            try:
+                from src.userbot.publisher import get_userbot_publisher
+
+                publisher = await get_userbot_publisher()
+
+                if publisher and publisher.is_available:
+                    logger.info("Публикуем отложенный пост {} через UserBot с Premium Emoji", post.id)
+
+                    # Получаем пути к медиа
+                    photo_path = post.photo_path if hasattr(post, 'photo_path') and post.photo_path else None
+                    video_path = post.video_path if hasattr(post, 'video_path') and post.video_path else None
+
+                    # Получаем media_items для альбомов (если есть)
+                    media_items = None
+                    if hasattr(post, 'get_media_items'):
+                        media_items = post.get_media_items()
+                        if media_items and len(media_items) > 1:
+                            logger.info("Публикуем альбом с {} медиа через UserBot", len(media_items))
+
+                    message_id = await publisher.publish_post(
+                        channel_id=target_channel_id,
+                        text=content,
+                        photo_path=photo_path,
+                        video_path=video_path,
+                        media_items=media_items if media_items and len(media_items) > 1 else None,
+                        pin_post=getattr(post, 'pin_post', False),
+                        add_footer=True
+                    )
+
+                    if message_id:
+                        # Обновляем статус поста
+                        post_crud = get_post_crud()
+                        await post_crud.update_post_status(post.id, PostStatus.POSTED)
+                        await post_crud.update_post(post.id, posted_date=datetime.now())
+
+                        logger.info("Отложенный пост {} опубликован через UserBot, message_id: {}",
+                                   post.id, message_id)
+
+                        # Отправляем подтверждение владельцу
+                        await notify_owner_about_publication(post)
+                        return True
+                    else:
+                        logger.warning("Не удалось опубликовать через UserBot, fallback на Bot API")
+                else:
+                    logger.debug("UserbotPublisher недоступен, используем Bot API")
+
+            except Exception as userbot_error:
+                logger.warning("Ошибка публикации через UserBot: {}, fallback на Bot API",
+                              str(userbot_error))
+
+        # Fallback: публикация через Bot API (без Premium Emoji)
+        logger.info("Публикуем отложенный пост {} через Bot API", post.id)
+
+        # Получаем экземпляр бота
+        bot = get_bot_instance()
+
         # Добавляем футер с полезными ссылками (Markdown режим)
-        content = add_footer_to_post(content, parse_mode="Markdown")
+        content_with_footer = add_footer_to_post(content, parse_mode="Markdown")
 
         # Публикуем пост в зависимости от типа медиа
         try:
             sent_message = None
-            
+
             # Получаем медиа через media_handler (поддержка фото и видео)
             from src.bot.media_handler import get_media_handler
             media_handler = get_media_handler()
-            media_for_send, media_type = media_handler.get_media_for_send(post)
-            
-            if media_for_send and media_type == 'photo':
-                logger.info("📸 Публикуем отложенный пост с фото")
-                sent_message = await bot.send_photo(
-                    chat_id=target_channel_id,
-                    photo=media_for_send,
-                    caption=content,
-                    parse_mode="Markdown"
+
+            # Проверяем наличие альбома
+            if hasattr(post, 'has_album') and post.has_album:
+                logger.info("Публикуем отложенный альбом с {} медиа через Bot API", post.album_count)
+                media_group = media_handler.get_media_group_for_send(
+                    post, content_with_footer, parse_mode="Markdown"
                 )
-            elif media_for_send and media_type == 'video':
-                logger.info("🎥 Публикуем отложенный пост с видео")
-                sent_message = await bot.send_video(
-                    chat_id=target_channel_id,
-                    video=media_for_send,
-                    caption=content,
-                    parse_mode="Markdown"
-                )
-            else:
-                logger.info("📝 Публикуем текстовый отложенный пост")
-                sent_message = await bot.send_message(
-                    chat_id=target_channel_id,
-                    text=content,
-                    parse_mode="Markdown"
-                )
-            
+
+                if len(media_group) >= 2:
+                    messages = await bot.send_media_group(
+                        chat_id=target_channel_id,
+                        media=media_group
+                    )
+                    # Берем первое сообщение
+                    sent_message = messages[0] if messages else None
+                else:
+                    logger.warning("Недостаточно медиа для альбома, публикуем как обычный пост")
+                    # Fallback на обычную логику ниже
+
+            # Если не альбом или альбом не удалось отправить
+            if sent_message is None:
+                media_for_send, media_type = media_handler.get_media_for_send(post)
+
+                if media_for_send and media_type == 'photo':
+                    logger.info("Публикуем отложенный пост с фото")
+                    sent_message = await bot.send_photo(
+                        chat_id=target_channel_id,
+                        photo=media_for_send,
+                        caption=content_with_footer,
+                        parse_mode="Markdown"
+                    )
+                elif media_for_send and media_type == 'video':
+                    logger.info("Публикуем отложенный пост с видео")
+                    sent_message = await bot.send_video(
+                        chat_id=target_channel_id,
+                        video=media_for_send,
+                        caption=content_with_footer,
+                        parse_mode="Markdown"
+                    )
+                else:
+                    logger.info("Публикуем текстовый отложенный пост")
+                    sent_message = await bot.send_message(
+                        chat_id=target_channel_id,
+                        text=content_with_footer,
+                        parse_mode="Markdown"
+                    )
+
             # Проверяем нужно ли закрепить пост
             if sent_message and hasattr(post, 'pin_post') and post.pin_post:
                 try:
@@ -169,32 +250,32 @@ async def publish_scheduled_post(post) -> bool:
                         message_id=sent_message.message_id,
                         disable_notification=True
                     )
-                    logger.info("📌 Пост {} закреплен в канале", post.id)
+                    logger.info("Пост {} закреплен в канале", post.id)
                 except Exception as pin_error:
-                    logger.warning("⚠️ Не удалось закрепить пост {}: {}", post.id, str(pin_error))
-            
+                    logger.warning("Не удалось закрепить пост {}: {}", post.id, str(pin_error))
+
             # Обновляем статус поста
             post_crud = get_post_crud()
             await post_crud.update_post_status(post.id, PostStatus.POSTED)
             await post_crud.update_post(post.id, posted_date=datetime.now())
-            
-            logger.info("Пост {} успешно опубликован в канале {}", 
+
+            logger.info("Пост {} успешно опубликован в канале {}",
                        post.id, target_channel_id)
-            
+
             # Отправляем подтверждение владельцу
             await notify_owner_about_publication(post)
-            
+
             return True
-            
+
         except Exception as e:
             logger.error("Ошибка публикации поста {} в Telegram: {}", post.id, str(e))
-            
+
             # Помечаем пост как проблемный
             post_crud = get_post_crud()
             await post_crud.add_post_error(post.id, f"Ошибка публикации: {str(e)}")
-            
+
             return False
-        
+
     except Exception as e:
         logger.error("Ошибка публикации отложенного поста {}: {}", post.id, str(e))
         return False

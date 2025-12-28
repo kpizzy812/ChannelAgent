@@ -72,6 +72,8 @@ sync_to_server() {
     fi
     
     echo -e "${CYAN}Синхронизирую файлы на сервер...${NC}"
+    echo -e "${YELLOW}Исключения из .rsyncignore:${NC}"
+    grep -E "userbot_session|monitoring_state" .rsyncignore || echo "Нет исключений для сессии!"
     rsync -avz --progress --exclude-from=.rsyncignore ${LOCAL_PATH}/ ${SERVER}:${REMOTE_PATH}/
     
     if [ $? -eq 0 ]; then
@@ -128,17 +130,9 @@ logs/
 # Дополнительные env файлы (основной .env должен синхронизироваться)
 .env.*
 
-# База данных SQLite (будет пересоздана на сервере)
-data/channel_agent.db*
-data/*.db
-data/*.db-shm
-data/*.db-wal
-
-# Медиа файлы Telegram (большие, можно исключить для деплоя)
-data/media/
-data/photos/
-data/videos/
-data/thumbnails/
+# ВСЯ папка data/ - серверные данные, НЕ синхронизировать!
+# (база данных, сессия UserBot, медиа файлы)
+data/
 
 # macOS системные файлы
 .DS_Store

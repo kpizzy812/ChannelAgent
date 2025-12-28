@@ -24,6 +24,7 @@ from src.bot.handlers.user_posts import get_user_posts_router
 from src.bot.handlers.userbot_auth import get_userbot_auth_router
 from src.bot.handlers.daily_posts import router as daily_posts_router
 from src.bot.handlers.weekly_analytics import router as weekly_analytics_router
+from src.bot.handlers.emoji_management import emoji_router
 from src.bot.filters.owner import owner_filter
 from src.utils.exceptions import BotError
 from src.utils.html_formatter import get_parse_mode
@@ -104,7 +105,11 @@ class ChannelAgentBot:
             self.dp.include_router(weekly_analytics_router)
             logger.debug("Зарегистрирован роутер еженедельной аналитики")
 
-            # 7. Основные команды (менее специфичные)
+            # 7. Управление Custom Emoji
+            self.dp.include_router(emoji_router)
+            logger.debug("Зарегистрирован роутер Custom Emoji")
+
+            # 8. Основные команды (менее специфичные)
             commands_router = get_commands_router()
             self.dp.include_router(commands_router)
             logger.debug("Зарегистрирован роутер команд")
@@ -128,6 +133,7 @@ class ChannelAgentBot:
                 BotCommand(command="connect_userbot", description="🔐 Подключить UserBot"),
                 BotCommand(command="channels", description="📺 Управление каналами"),
                 BotCommand(command="moderation", description="⚖️ Модерация постов"),
+                BotCommand(command="emoji", description="🎨 Premium Emoji"),
                 BotCommand(command="daily", description="📊 Ежедневные посты"),
                 BotCommand(command="weekly", description="📈 Еженедельная аналитика"),
                 BotCommand(command="examples", description="📝 Примеры постов"),

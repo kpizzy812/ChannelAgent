@@ -4,9 +4,10 @@
 """
 
 from datetime import datetime
-from typing import Optional
-from dataclasses import dataclass
+from typing import Optional, List
+from dataclasses import dataclass, field
 from enum import Enum
+import json
 
 # Логирование (ОБЯЗАТЕЛЬНО loguru)
 from loguru import logger
@@ -86,7 +87,17 @@ class Post(BaseModel):
     ai_analysis: Optional[str] = None
     error_message: Optional[str] = None
     pin_post: bool = False  # Нужно ли закрепить пост при публикации
-    
+
+    # Извлечённые ссылки из поста (JSON)
+    extracted_links: Optional[str] = None
+
+    # Множественные медиа (альбомы) - JSON массив
+    # Формат: [{"type": "photo", "path": "...", "position": 0}, ...]
+    media_items: Optional[str] = None
+
+    # Счётчик попыток публикации для retry механизма
+    retry_count: int = 0
+
     # Для совместимости со схемой БД
     created_date: Optional[datetime] = None
     
@@ -185,10 +196,83 @@ class Post(BaseModel):
         """Форматированная длительность видео"""
         if self.video_duration is None:
             return "неизвестно"
-        
+
         minutes = self.video_duration // 60
         seconds = self.video_duration % 60
         return f"{minutes:02d}:{seconds:02d}"
+
+    @property
+    def media_list(self) -> List[dict]:
+        """Парсинг JSON media_items в список словарей"""
+        if not self.media_items:
+            return []
+        try:
+            items = json.loads(self.media_items)
+            # Сортируем по позиции
+            return sorted(items, key=lambda x: x.get('position', 0))
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.error("Ошибка парсинга media_items для поста {}: {}", self.id, str(e))
+            return []
+
+    @property
+    def has_album(self) -> bool:
+        """Проверка наличия альбома (более 1 медиа)"""
+        return len(self.get_media_items()) > 1
+
+    @property
+    def album_count(self) -> int:
+        """Количество медиа в альбоме"""
+        return len(self.get_media_items())
+
+    def get_media_items(self) -> List[dict]:
+        """
+        Получить список медиа с fallback на старые поля
+
+        Returns:
+            Список словарей с информацией о медиа
+        """
+        # Если есть media_items - используем его
+        if self.media_items:
+            return self.media_list
+
+        # Fallback для старых постов с одним медиа
+        if self.photo_path:
+            return [{"type": "photo", "path": self.photo_path, "position": 0}]
+        if self.video_path:
+            return [{"type": "video", "path": self.video_path, "position": 0}]
+
+        return []
+
+    def add_media_item(self, media_type: str, path: str, position: int) -> None:
+        """
+        Добавить медиа элемент в список
+
+        Args:
+            media_type: Тип медиа ('photo' или 'video')
+            path: Путь к файлу
+            position: Позиция в альбоме (0-based)
+        """
+        items = self.media_list.copy()
+
+        new_item = {
+            "type": media_type,
+            "path": path,
+            "position": position
+        }
+
+        # Проверяем нет ли уже такого элемента
+        for item in items:
+            if item.get('path') == path:
+                logger.debug("Медиа {} уже добавлен в пост {}", path, self.id)
+                return
+
+        items.append(new_item)
+        # Сортируем по позиции
+        items = sorted(items, key=lambda x: x.get('position', 0))
+
+        self.media_items = json.dumps(items, ensure_ascii=False)
+        logger.debug("Добавлен медиа элемент в пост {}: {} (позиция {})",
+                    self.id, media_type, position)
     
     @property
     def can_be_approved(self) -> bool:

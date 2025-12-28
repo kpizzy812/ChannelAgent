@@ -200,6 +200,27 @@ class AIPostProcessor:
             logger.error("Ошибка извлечения медиа информации: {}", str(e))
             return None
     
+    async def _get_source_channel_info(self, channel_id: int) -> Optional[Dict[str, Any]]:
+        """Получить информацию о канале-источнике для удаления брендинга"""
+        try:
+            async with get_db_connection() as conn:
+                cursor = await conn.execute(
+                    "SELECT title, username FROM channels WHERE channel_id = ?",
+                    (channel_id,)
+                )
+                row = await cursor.fetchone()
+
+                if row:
+                    return {
+                        "title": row[0],
+                        "username": row[1]
+                    }
+                return None
+
+        except Exception as e:
+            logger.error("Ошибка получения информации о канале {}: {}", channel_id, str(e))
+            return None
+
     async def _get_user_style_examples(self, limit: int = 3) -> List[str]:
         """Получить примеры постов пользователя для анализа стиля"""
         try:
@@ -418,24 +439,38 @@ class AIPostProcessor:
         Двухэтапный рестайлинг поста:
         1. Максимальная уникализация контента
         2. Красивое HTML форматирование
-        
+
         Args:
             post: Объект поста для обработки
-            
+
         Returns:
             Результат двухэтапной обработки
         """
         try:
             logger.info("🔄 Начинается двухэтапный рестайлинг поста: {}", post.unique_id)
-            
-            # Получаем примеры стиля пользователя
-            user_examples = await self._get_user_style_examples(limit=3)
-            
-            # ЭТАП 1: Уникализация контента
-            logger.info("🎯 ЭТАП 1: Максимальная уникализация контента")
+
+            # Получаем информацию о канале-источнике для удаления брендинга
+            source_channel_title = None
+            source_channel_username = None
+            try:
+                channel_info = await self._get_source_channel_info(post.channel_id)
+                if channel_info:
+                    source_channel_title = channel_info.get("title")
+                    source_channel_username = channel_info.get("username")
+                    logger.debug("Канал-источник: {} (@{})", source_channel_title, source_channel_username)
+            except Exception as e:
+                logger.warning("Не удалось получить информацию о канале-источнике: {}", str(e))
+
+            # Получаем примеры стиля пользователя (больше примеров = лучше понимание стиля)
+            user_examples = await self._get_user_style_examples(limit=5)
+
+            # ЭТАП 1: Адаптация под стиль пользователя
+            logger.info("🎯 ЭТАП 1: Адаптация контента под стиль пользователя")
             uniqualization_result = await self.openai_client.uniqualize_content(
                 original_text=post.original_text or "",
-                user_examples=user_examples
+                user_examples=user_examples,
+                source_channel_title=source_channel_title,
+                source_channel_username=source_channel_username
             )
             
             if not uniqualization_result.get("success"):
@@ -454,9 +489,9 @@ class AIPostProcessor:
             # 🔍 DEBUG: Полный результат этапа 1
             logger.info("📊 КООРДИНАТОР - РЕЗУЛЬТАТ ЭТАПА 1:\n{}", repr(uniqualized_text))
             
-            # ЭТАП 2: HTML форматирование
-            logger.info("🎨 ЭТАП 2: HTML форматирование")
-            formatting_result = await self.openai_client.format_with_html(
+            # ЭТАП 2: Markdown форматирование (для Telethon)
+            logger.info("🎨 ЭТАП 2: Markdown форматирование")
+            formatting_result = await self.openai_client.format_with_markdown(
                 text=uniqualized_text
             )
             
@@ -470,32 +505,101 @@ class AIPostProcessor:
                     "final_text": uniqualized_text  # Хотя бы уникализированный текст
                 }
             
-            final_text = formatting_result.get("formatted_text", "")
-            logger.info("✅ ЭТАП 2 завершен: {} символов финального HTML", len(final_text))
-            
+            formatted_text = formatting_result.get("formatted_text", "")
+            logger.info("✅ ЭТАП 2 завершен: {} символов Markdown", len(formatted_text))
+
+            # ЭТАП 3-4: Анализ источника и интеграция ссылки
+            final_text = formatted_text
+            source_url = None
+            first_verb = None
+            source_integrated = False
+            source_confidence = 0.0
+
+            if post.extracted_links:
+                try:
+                    import json
+                    from src.ai.source_analyzer import get_source_analyzer
+                    from src.ai.source_integrator import get_source_integrator
+
+                    # ЭТАП 3: Анализ источника через GPT-4o-mini
+                    logger.info("🔗 ЭТАП 3: Анализ источника (GPT-4o-mini)")
+                    links = json.loads(post.extracted_links)
+                    analyzer = get_source_analyzer()
+                    analysis = await analyzer.analyze(formatted_text, links)
+
+                    source_url = analysis.source_url
+                    first_verb = analysis.first_verb
+                    source_confidence = analysis.confidence
+
+                    logger.debug(
+                        "GPT анализ: source={}, verb={}, confidence={:.2f}",
+                        source_url[:40] if source_url else None,
+                        first_verb,
+                        source_confidence
+                    )
+
+                    # Проверяем порог уверенности
+                    if source_confidence < 0.7:
+                        logger.info(
+                            "Низкая уверенность ({:.2f}), пропускаем интеграцию ссылки",
+                            source_confidence
+                        )
+                    elif source_url and first_verb:
+                        # ЭТАП 4: Интеграция ссылки (re.sub, без LLM)
+                        logger.info("🔗 ЭТАП 4: Интеграция ссылки на глагол '{}'", first_verb)
+                        integrator = get_source_integrator()
+
+                        final_text, source_integrated = integrator.integrate(
+                            formatted_text, source_url, first_verb
+                        )
+
+                        if source_integrated:
+                            logger.info(
+                                "✅ Ссылка интегрирована: [{}]({}...)",
+                                first_verb, source_url[:40]
+                            )
+                        else:
+                            logger.warning(
+                                "⚠️ Интеграция не сработала: глагол '{}' не найден",
+                                first_verb
+                            )
+
+                except Exception as e:
+                    logger.error("Ошибка анализа/интеграции источника: {}", str(e))
+                    # Продолжаем с formatted_text без ссылки
+
             # 🔍 DEBUG: Финальный результат координатора
             logger.info("🏆 КООРДИНАТОР - ФИНАЛЬНЫЙ РЕЗУЛЬТАТ:\n{}", repr(final_text))
             logger.info("🏆 КООРДИНАТОР - ФИНАЛЬНЫЙ ВИЗУАЛЬНО:\n{}", final_text)
-            
-            # ✅ Финальный HTML готов без дополнительных проверок
-            logger.info("✅ Обработка завершена, HTML готов к использованию")
-            
+
+            # ✅ Финальный Markdown готов для Telethon
+            processing_stages = 4 if source_integrated else (3 if post.extracted_links else 2)
+            logger.info("✅ Обработка завершена, {} этапов, Markdown готов", processing_stages)
+
             # Создаем финальный результат
             result = {
                 "success": True,
                 "final_text": final_text,
                 "original_text": post.original_text,
                 "uniqualized_text": uniqualized_text,
+                "formatted_text": formatted_text,
                 "stage_1_result": uniqualization_result,
                 "stage_2_result": formatting_result,
+                "source_url": source_url,
+                "first_verb": first_verb,
+                "source_confidence": source_confidence,
+                "source_integrated": source_integrated,
                 "changes_made": post.original_text != final_text,
-                "processing_stages": 2,
+                "processing_stages": processing_stages,
                 "final_length": len(final_text),
                 "original_length": len(post.original_text or "")
             }
-            
-            logger.info("🎉 Двухэтапный рестайлинг завершен для поста {}: {} -> {} символов", 
-                       post.unique_id, len(post.original_text or ""), len(final_text))
+
+            logger.info(
+                "🎉 Рестайлинг завершен для поста {}: {} -> {} символов, источник: {}",
+                post.unique_id, len(post.original_text or ""), len(final_text),
+                "интегрирован" if source_integrated else "нет"
+            )
             
             return result
             

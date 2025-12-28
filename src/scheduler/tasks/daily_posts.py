@@ -1,6 +1,7 @@
 """
 Задача создания ежедневных постов
 Генерация постов с криптовалютными данными и рыночными сводками
+С retry механизмом при сетевых ошибках
 """
 
 import asyncio
@@ -22,6 +23,10 @@ from src.utils.post_footer import add_footer_to_post
 
 # Настройка логгера модуля
 logger = logger.bind(module="scheduler_daily_posts")
+
+# Константы для retry механизма
+MAX_PUBLISH_RETRIES = 3  # Максимум попыток публикации
+RETRY_DELAY_MINUTES = 5  # Задержка между попытками в минутах
 
 
 async def create_daily_crypto_post() -> None:
@@ -390,19 +395,20 @@ async def save_daily_post(content: str, auto_publish: bool = True, photo_file_id
 async def publish_daily_post_to_channel(post, content: str) -> bool:
     """
     Опубликовать ежедневный пост в целевой канал
-    
+    При ошибке планирует повторную попытку через RETRY_DELAY_MINUTES минут
+
     Args:
         post: Объект поста из БД
         content: Содержимое поста
-        
+
     Returns:
         True если пост опубликован успешно
     """
     try:
         logger.info("📤 Публикация ежедневного поста в канал")
-        
+
         config = get_config()
-        
+
         # Получаем экземпляр бота
         bot = get_bot_instance()
 
@@ -427,26 +433,28 @@ async def publish_daily_post_to_channel(post, content: str) -> bool:
                 text=content,
                 parse_mode="Markdown"  # Используем Markdown для корректного отображения
             )
-        
+
         if sent_message:
             # Обновляем пост в БД - отмечаем как опубликованный
             post_crud = get_post_crud()
-            
+
             # Получаем текущий пост для обновления
             current_post = await post_crud.get_by_id(post.id)
             if current_post:
-                # Обновляем статус и дату публикации
+                # Обновляем статус и дату публикации, сбрасываем retry_count
                 current_post.status = PostStatus.POSTED
                 current_post.posted_date = datetime.now()
+                if hasattr(current_post, 'retry_count'):
+                    current_post.retry_count = 0
                 await post_crud.update(current_post)
-            
+
             # Проверяем настройку закрепления постов
             try:
                 from src.database.crud.setting import get_setting_crud
                 setting_crud = get_setting_crud()
                 pin_enabled_setting = await setting_crud.get_setting("daily_post.pin_enabled")
                 pin_enabled = pin_enabled_setting and pin_enabled_setting.lower() == 'true'
-                
+
                 if pin_enabled:
                     # Закрепляем пост
                     await bot.pin_chat_message(
@@ -455,20 +463,99 @@ async def publish_daily_post_to_channel(post, content: str) -> bool:
                         disable_notification=True  # Не уведомляем подписчиков о закреплении
                     )
                     logger.info("📌 Ежедневный пост закреплен в канале")
-                    
+
             except Exception as pin_error:
                 # Ошибка закрепления не критична
                 logger.warning("⚠️ Не удалось закрепить пост: {}", str(pin_error))
-            
+
             logger.info("✅ Ежедневный пост опубликован в канал: message_id {}", sent_message.message_id)
             return True
         else:
             logger.error("❌ Не удалось отправить пост в канал")
+            await schedule_post_retry(post)
             return False
-            
+
     except Exception as e:
         logger.error("❌ Ошибка публикации ежедневного поста: {}", str(e))
+        # Планируем повторную попытку
+        await schedule_post_retry(post)
         return False
+
+
+async def schedule_post_retry(post) -> bool:
+    """
+    Запланировать повторную попытку публикации поста
+
+    Args:
+        post: Объект поста
+
+    Returns:
+        True если retry запланирован, False если лимит исчерпан
+    """
+    try:
+        post_crud = get_post_crud()
+        current_post = await post_crud.get_by_id(post.id)
+
+        if not current_post:
+            logger.error("Пост {} не найден для retry", post.id)
+            return False
+
+        # Получаем текущий retry_count
+        retry_count = getattr(current_post, 'retry_count', 0) or 0
+
+        if retry_count >= MAX_PUBLISH_RETRIES:
+            logger.error("❌ Пост {} достиг лимита retry ({}/{}), уведомляем владельца",
+                        post.id, retry_count, MAX_PUBLISH_RETRIES)
+            await notify_owner_about_failed_post(current_post)
+            return False
+
+        # Планируем следующую попытку
+        next_retry = datetime.now() + timedelta(minutes=RETRY_DELAY_MINUTES)
+        new_retry_count = retry_count + 1
+
+        # Обновляем пост: статус SCHEDULED, время = now + RETRY_DELAY_MINUTES
+        current_post.status = PostStatus.SCHEDULED
+        current_post.scheduled_date = next_retry
+        if hasattr(current_post, 'retry_count'):
+            current_post.retry_count = new_retry_count
+        await post_crud.update(current_post)
+
+        logger.warning("⏰ Пост {} запланирован на retry #{} в {}",
+                      post.id, new_retry_count, next_retry.strftime("%H:%M:%S"))
+        return True
+
+    except Exception as e:
+        logger.error("Ошибка планирования retry для поста {}: {}", post.id, str(e))
+        return False
+
+
+async def notify_owner_about_failed_post(post) -> None:
+    """Уведомить владельца о неудачной публикации после всех retry"""
+    try:
+        config = get_config()
+        bot = get_bot_instance()
+
+        notification_text = f"""❌ <b>Ошибка публикации ежедневного поста</b>
+
+🆔 ID поста: {post.id}
+🔄 Попыток публикации: {MAX_PUBLISH_RETRIES}
+🕐 Время: {datetime.now().strftime('%H:%M %d.%m.%Y')}
+
+Публикация не удалась после {MAX_PUBLISH_RETRIES} попыток.
+Возможные причины: сетевые проблемы, Telegram API недоступен.
+
+Используйте /moderation для ручной публикации."""
+
+        await bot.send_message(
+            chat_id=config.OWNER_ID,
+            text=notification_text,
+            parse_mode="HTML"
+        )
+
+        logger.info("Уведомление о неудачной публикации отправлено владельцу")
+
+    except Exception as e:
+        logger.error("Ошибка отправки уведомления о неудачной публикации: {}", str(e))
 
 
 async def notify_owner_about_daily_post(post) -> None:

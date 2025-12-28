@@ -607,29 +607,71 @@ async def userbot_status_callback(callback: CallbackQuery):
     """Показать статус UserBot"""
     try:
         await safe_callback_answer(callback)
-        
+
         auth_manager = get_auth_manager()
         status = await auth_manager.get_status()
-        
+
         if status == AuthStatus.CONNECTED:
             status_icon = "🟢"
             status_text = "Подключен и активен"
             additional_info = "📡 Мониторинг каналов работает\n🔄 Последняя активность: только что"
         elif status == AuthStatus.CONNECTING:
-            status_icon = "🟡" 
+            status_icon = "🟡"
             status_text = "Подключается..."
             additional_info = "⏳ Процесс подключения в процессе"
         else:
             status_icon = "🔴"
             status_text = "Не подключен"
             additional_info = "❌ Мониторинг каналов остановлен\n🔧 Используйте /connect_userbot для подключения"
-        
+
+        # Получаем информацию о UserbotPublisher для Premium Emoji
+        publisher_info = ""
+        if status == AuthStatus.CONNECTED:
+            try:
+                from src.userbot.publisher import get_userbot_publisher
+                publisher = await get_userbot_publisher()
+
+                if publisher and publisher.is_available:
+                    # Получаем информацию о UserBot
+                    me = await publisher.client.get_me()
+                    userbot_name = f"@{me.username}" if me.username else f"{me.first_name} {me.last_name or ''}"
+
+                    # Проверяем найден ли целевой канал
+                    if publisher._target_entity:
+                        channel_title = getattr(publisher._target_entity, 'title', 'unknown')
+                        channel_username = getattr(publisher._target_entity, 'username', None)
+                        channel_info = f"@{channel_username}" if channel_username else channel_title
+                        publisher_info = f"""
+
+🎨 {bold('Premium Emoji Publisher:')}
+👤 Аккаунт: {userbot_name}
+✅ Целевой канал: {channel_info}
+🚀 Готов к публикации с Premium эмодзи"""
+                    else:
+                        publisher_info = f"""
+
+🎨 {bold('Premium Emoji Publisher:')}
+👤 Аккаунт: {userbot_name}
+❌ Целевой канал НЕ найден в диалогах!
+⚠️ Публикация через Bot API (без Premium эмодзи)"""
+                else:
+                    publisher_info = f"""
+
+🎨 {bold('Premium Emoji Publisher:')}
+🔴 Не инициализирован"""
+            except Exception as pub_error:
+                logger.warning("Не удалось получить статус Publisher: {}", str(pub_error))
+                publisher_info = f"""
+
+🎨 {bold('Premium Emoji Publisher:')}
+⚠️ Ошибка: {str(pub_error)[:50]}"""
+
         userbot_text = f"""🤖 {bold('Статус UserBot')}
 
 {status_icon} {bold('Состояние:')} {status_text}
 
 📋 {bold('Подробности:')}
-{additional_info}
+{additional_info}{publisher_info}
 
 💡 {bold('UserBot')} - это ваш личный аккаунт Telegram, который используется для мониторинга каналов через официальное API."""
         
@@ -648,8 +690,11 @@ async def userbot_status_callback(callback: CallbackQuery):
         
         keyboard_buttons.extend([
             [
-                InlineKeyboardButton(text="🔐 Подключить UserBot", callback_data="connect_userbot") if status != AuthStatus.CONNECTED else 
+                InlineKeyboardButton(text="🔐 Подключить UserBot", callback_data="connect_userbot") if status != AuthStatus.CONNECTED else
                 InlineKeyboardButton(text="🔌 Отключить UserBot", callback_data="disconnect_userbot")
+            ],
+            [
+                InlineKeyboardButton(text="🗑️ Сбросить сессию (сменить аккаунт)", callback_data="confirm_reset_userbot")
             ],
             [
                 InlineKeyboardButton(text="⬅️ К статусу системы", callback_data="system_status")
@@ -673,49 +718,71 @@ async def userbot_status_callback(callback: CallbackQuery):
 
 @commands_router.callback_query(F.data == "reregister_handlers", OwnerFilter())
 async def reregister_handlers_callback(callback: CallbackQuery):
-    """🔧 Принудительная перерегистрация обработчиков Telethon"""
+    """🔧 Вступление в каналы + перерегистрация обработчиков Telethon"""
     try:
-        await safe_callback_answer(callback, "🔄 Перерегистрация обработчиков...", show_alert=True)
-        
-        # Показываем процесс
-        process_text = """🔧 <b>Перерегистрация обработчиков</b>
+        await safe_callback_answer(callback, "🔄 Вступление в каналы...", show_alert=True)
 
-⏳ Выполняется принудительная перерегистрация обработчиков Telethon...
+        # Показываем процесс - Шаг 1
+        process_text = """🔧 <b>Вступление в каналы и перерегистрация</b>
 
-⚠️ Это может занять до 30 секунд"""
-        
+⏳ <b>Шаг 1/2:</b> Вступаем во все каналы из БД...
+
+⚠️ Это может занять до 60 секунд"""
+
         await callback.message.edit_text(
             process_text,
             parse_mode=get_parse_mode()
         )
-        
-        # Выполняем перерегистрацию
+
         from src.userbot.monitor import get_channel_monitor
-        
         monitor = get_channel_monitor()
-        logger.info("🔧 Пользователь {} запросил перерегистрацию обработчиков", callback.from_user.id)
-        
-        # Выполняем перерегистрацию
+        logger.info("🔧 Пользователь {} запросил вступление в каналы и перерегистрацию", callback.from_user.id)
+
+        # Шаг 1: Вступаем во все каналы
+        join_results = await monitor.join_all_channels()
+
+        # Обновляем статус - Шаг 2
+        step2_text = f"""🔧 <b>Вступление в каналы и перерегистрация</b>
+
+✅ <b>Шаг 1/2:</b> Вступление завершено
+   • Вступили: {join_results['joined']}
+   • Уже были: {join_results['already_member']}
+   • Ошибки: {join_results['failed']}
+
+⏳ <b>Шаг 2/2:</b> Перерегистрация обработчиков..."""
+
+        await callback.message.edit_text(
+            step2_text,
+            parse_mode=get_parse_mode()
+        )
+
+        # Шаг 2: Перерегистрация обработчиков
         reregister_success = await monitor.force_reregister_handlers()
-        
+
         if reregister_success:
-            result_text = """✅ <b>Перерегистрация успешна!</b>
+            result_text = f"""✅ <b>Операция завершена!</b>
 
-🔄 Обработчики Telethon перерегистрированы
-🧪 Проведена проверка доступа к каналам  
-📡 Мониторинг должен работать нормально
+📊 <b>Вступление в каналы:</b>
+   • Вступили: {join_results['joined']}
+   • Уже были: {join_results['already_member']}
+   • Ошибки: {join_results['failed']} / {join_results['total']}
 
-💡 Если проблемы сохраняются, проверьте подключение к каналам"""
+🔄 <b>Перерегистрация:</b> ✅ успешно
+
+📡 Мониторинг должен работать"""
             result_icon = "✅"
         else:
-            result_text = """❌ <b>Ошибка перерегистрации</b>
+            result_text = f"""⚠️ <b>Завершено с ошибками</b>
 
-🚨 Не удалось перерегистрировать обработчики
-🔧 Попробуйте отключить и переподключить UserBot
-📋 Проверьте логи для подробностей
+📊 <b>Вступление в каналы:</b>
+   • Вступили: {join_results['joined']}
+   • Уже были: {join_results['already_member']}
+   • Ошибки: {join_results['failed']}
 
-⚠️ Возможны проблемы с подключением"""
-            result_icon = "❌"
+❌ <b>Перерегистрация:</b> ошибка
+
+🔧 Попробуйте переподключить UserBot"""
+            result_icon = "⚠️"
         
         # Создаем клавиатуру результата
         result_keyboard = InlineKeyboardMarkup(inline_keyboard=[

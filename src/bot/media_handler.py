@@ -5,10 +5,10 @@
 
 import os
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, Union, List
 
 # aiogram 3.x импорты
-from aiogram.types import FSInputFile, BufferedInputFile
+from aiogram.types import FSInputFile, BufferedInputFile, InputMediaPhoto, InputMediaVideo
 
 # Логирование (ОБЯЗАТЕЛЬНО loguru)
 from loguru import logger
@@ -114,10 +114,10 @@ class BotMediaHandler:
     def get_media_for_send(self, post: Post) -> tuple[Optional[Union[FSInputFile, str]], str]:
         """
         Получить медиа для отправки (фото или видео)
-        
+
         Args:
             post: Объект поста с медиа
-            
+
         Returns:
             Tuple (медиа_объект, тип_медиа) где тип_медиа = 'photo', 'video' или None
         """
@@ -129,7 +129,71 @@ class BotMediaHandler:
             return video, 'video' if video else None
         else:
             return None, None
-    
+
+    def get_media_group_for_send(
+        self,
+        post: Post,
+        caption: Optional[str] = None,
+        parse_mode: Optional[str] = "HTML"
+    ) -> List[Union[InputMediaPhoto, InputMediaVideo]]:
+        """
+        Получить список медиа для отправки как альбом (media_group)
+
+        Args:
+            post: Объект поста с медиа
+            caption: Подпись для первого элемента (опционально)
+            parse_mode: Режим парсинга для caption
+
+        Returns:
+            Список InputMediaPhoto/InputMediaVideo для send_media_group
+        """
+        media_group = []
+        media_items = post.get_media_items()
+
+        if not media_items:
+            logger.debug("Нет медиа элементов для альбома поста {}", post.id)
+            return media_group
+
+        for i, item in enumerate(media_items):
+            file_path = Path(item.get('path', ''))
+            media_type = item.get('type', 'photo')
+
+            if not file_path.exists():
+                logger.warning("Файл не найден для альбома поста {}: {}", post.id, file_path)
+                continue
+
+            try:
+                file_input = FSInputFile(
+                    path=str(file_path),
+                    filename=f"{media_type}_{post.id}_{i}{file_path.suffix}"
+                )
+
+                # Caption только у первого элемента
+                item_caption = caption if i == 0 else None
+                item_parse_mode = parse_mode if i == 0 else None
+
+                if media_type == 'photo':
+                    media_group.append(InputMediaPhoto(
+                        media=file_input,
+                        caption=item_caption,
+                        parse_mode=item_parse_mode
+                    ))
+                elif media_type == 'video':
+                    media_group.append(InputMediaVideo(
+                        media=file_input,
+                        caption=item_caption,
+                        parse_mode=item_parse_mode
+                    ))
+                else:
+                    logger.warning("Неизвестный тип медиа: {} для поста {}", media_type, post.id)
+
+            except Exception as e:
+                logger.error("Ошибка создания InputMedia для {}: {}", file_path, str(e))
+                continue
+
+        logger.debug("Создан media_group для поста {}: {} элементов", post.id, len(media_group))
+        return media_group
+
     def get_photo_bytes(self, post: Post) -> Optional[bytes]:
         """
         Получить байты фото для AI анализа

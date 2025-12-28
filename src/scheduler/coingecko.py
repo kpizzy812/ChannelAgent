@@ -1,9 +1,11 @@
 """
 Интеграция с CoinGecko API
 Получение актуальных данных о криптовалютах
+С персистентным SQLite кэшем для устойчивости к сетевым сбоям
 """
 
 import asyncio
+import json
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
 
@@ -23,6 +25,78 @@ logger = logger.bind(module="coingecko_api")
 # Константы CoinGecko API
 COINGECKO_API_BASE = "https://api.coingecko.com/api/v3"
 DEFAULT_COINS = ["bitcoin", "ethereum", "solana", "cardano", "polkadot"]
+
+# Константы для персистентного кэша
+PERSISTENT_CACHE_KEY = "coingecko_latest"
+PERSISTENT_CACHE_MAX_AGE_HOURS = 24  # Максимальный возраст кэша в часах
+
+
+async def save_to_persistent_cache(cache_key: str, data: Dict[str, Any]) -> bool:
+    """
+    Сохранить данные в персистентный SQLite кэш
+
+    Args:
+        cache_key: Ключ кэша
+        data: Данные для сохранения
+
+    Returns:
+        True если сохранение успешно
+    """
+    try:
+        from src.database.connection import get_db_connection
+
+        # Сериализуем данные в JSON
+        json_data = json.dumps(data, default=str, ensure_ascii=False)
+
+        async with get_db_connection() as conn:
+            await conn.execute("""
+                INSERT OR REPLACE INTO coingecko_cache (cache_key, data, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+            """, (cache_key, json_data))
+            await conn.commit()
+
+        logger.debug("Данные сохранены в персистентный кэш: {}", cache_key)
+        return True
+
+    except Exception as e:
+        logger.error("Ошибка сохранения в персистентный кэш: {}", str(e))
+        return False
+
+
+async def load_from_persistent_cache(cache_key: str, max_age_hours: int = PERSISTENT_CACHE_MAX_AGE_HOURS) -> Optional[Dict[str, Any]]:
+    """
+    Загрузить данные из персистентного SQLite кэша
+
+    Args:
+        cache_key: Ключ кэша
+        max_age_hours: Максимальный возраст кэша в часах
+
+    Returns:
+        Данные из кэша или None
+    """
+    try:
+        from src.database.connection import get_db_connection
+
+        async with get_db_connection() as conn:
+            cursor = await conn.execute("""
+                SELECT data, updated_at FROM coingecko_cache
+                WHERE cache_key = ?
+                AND datetime(updated_at) > datetime('now', ?)
+            """, (cache_key, f'-{max_age_hours} hours'))
+
+            row = await cursor.fetchone()
+
+            if row:
+                data = json.loads(row[0])
+                updated_at = row[1]
+                logger.info("Загружены данные из персистентного кэша: {} (обновлено: {})", cache_key, updated_at)
+                return data
+
+        return None
+
+    except Exception as e:
+        logger.error("Ошибка загрузки из персистентного кэша: {}", str(e))
+        return None
 
 
 class CoinGeckoClient:
@@ -263,67 +337,114 @@ async def get_coingecko_data() -> Optional[Dict[str, Any]]:
     """
     Получить актуальные данные криптовалют
     Главная функция для использования в задачах планировщика
-    
+    При ошибке сети использует персистентный SQLite кэш
+
     Returns:
         Объединенные данные CoinGecko
     """
     try:
         logger.info("📊 Получение данных CoinGecko")
-        
+
         config = get_config()
-        
+
         # Определяем какие монеты отслеживать
         coins_config = getattr(config, 'COINGECKO_COINS', 'bitcoin,ethereum,solana')
         coin_ids = [coin.strip() for coin in coins_config.split(',')]
-        
+
         if not coin_ids:
             coin_ids = DEFAULT_COINS
-        
+
         logger.debug("Отслеживаемые монеты: {}", coin_ids)
-        
-        async with get_coingecko_client() as client:
-            # Параллельно получаем разные типы данных
-            tasks = [
-                client.get_coins_data(coin_ids),
-                client.get_global_data(),
-                client.get_trending_coins()
-            ]
-            
-            coins_data, global_data, trending_data = await asyncio.gather(
-                *tasks, return_exceptions=True
-            )
-            
-            # Обрабатываем исключения
-            if isinstance(coins_data, Exception):
-                logger.error("Ошибка получения данных монет: {}", str(coins_data))
-                coins_data = None
-            
-            if isinstance(global_data, Exception):
-                logger.error("Ошибка получения глобальных данных: {}", str(global_data))
-                global_data = None
-            
-            if isinstance(trending_data, Exception):
-                logger.error("Ошибка получения trending данных: {}", str(trending_data))
-                trending_data = None
-            
-            # Объединяем данные
-            result = {
-                'coins': coins_data or [],
-                'global': global_data or {},
-                'trending': trending_data or [],
-                'last_updated': datetime.now(),
-                'success': bool(coins_data or global_data)
+
+        try:
+            async with get_coingecko_client() as client:
+                # Параллельно получаем разные типы данных
+                tasks = [
+                    client.get_coins_data(coin_ids),
+                    client.get_global_data(),
+                    client.get_trending_coins()
+                ]
+
+                coins_data, global_data, trending_data = await asyncio.gather(
+                    *tasks, return_exceptions=True
+                )
+
+                # Обрабатываем исключения
+                if isinstance(coins_data, Exception):
+                    logger.error("Ошибка получения данных монет: {}", str(coins_data))
+                    coins_data = None
+
+                if isinstance(global_data, Exception):
+                    logger.error("Ошибка получения глобальных данных: {}", str(global_data))
+                    global_data = None
+
+                if isinstance(trending_data, Exception):
+                    logger.error("Ошибка получения trending данных: {}", str(trending_data))
+                    trending_data = None
+
+                # Объединяем данные
+                result = {
+                    'coins': coins_data or [],
+                    'global': global_data or {},
+                    'trending': trending_data or [],
+                    'last_updated': datetime.now().isoformat(),
+                    'success': bool(coins_data or global_data),
+                    'from_cache': False
+                }
+
+                if result['success']:
+                    logger.info("✅ Данные CoinGecko получены успешно")
+                    # Сохраняем в персистентный кэш для будущих сбоев
+                    await save_to_persistent_cache(PERSISTENT_CACHE_KEY, result)
+                else:
+                    logger.warning("⚠️ Не удалось получить данные CoinGecko, пробуем кэш")
+                    # Пробуем загрузить из персистентного кэша
+                    cached_data = await load_from_persistent_cache(PERSISTENT_CACHE_KEY)
+                    if cached_data:
+                        cached_data['from_cache'] = True
+                        cached_data['success'] = True
+                        logger.info("📦 Используются данные из персистентного кэша")
+                        return cached_data
+
+                return result
+
+        except (aiohttp.ClientError, CoinGeckoAPIError) as network_error:
+            # Сетевая ошибка - пробуем персистентный кэш
+            logger.warning("⚠️ Сетевая ошибка CoinGecko: {}, пробуем персистентный кэш", str(network_error))
+
+            cached_data = await load_from_persistent_cache(PERSISTENT_CACHE_KEY)
+            if cached_data:
+                cached_data['from_cache'] = True
+                cached_data['success'] = True
+                logger.info("📦 Используются данные из персистентного кэша (сетевая ошибка)")
+                return cached_data
+
+            # Если кэш пустой, возвращаем пустые данные с флагом ошибки
+            logger.error("❌ Нет данных в кэше, возвращаем пустые данные")
+            return {
+                'coins': [],
+                'global': {},
+                'trending': [],
+                'last_updated': datetime.now().isoformat(),
+                'success': False,
+                'from_cache': False,
+                'error': str(network_error)
             }
-            
-            if result['success']:
-                logger.info("✅ Данные CoinGecko получены успешно")
-            else:
-                logger.warning("⚠️ Не удалось получить данные CoinGecko")
-            
-            return result
-        
+
     except Exception as e:
         logger.error("❌ Критическая ошибка получения данных CoinGecko: {}", str(e))
+
+        # Последняя попытка - персистентный кэш
+        try:
+            cached_data = await load_from_persistent_cache(PERSISTENT_CACHE_KEY)
+            if cached_data:
+                cached_data['from_cache'] = True
+                cached_data['success'] = True
+                logger.info("📦 Критическая ошибка, используем персистентный кэш")
+                return cached_data
+        except Exception:
+            pass
+
         raise CoinGeckoAPIError(details=str(e))
 
 

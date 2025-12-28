@@ -789,12 +789,15 @@ class PostCRUD:
     @staticmethod
     def _row_to_post(row) -> Post:
         """Преобразовать строку БД в объект Post"""
-        # Определяем правильные индексы по структуре таблицы
-        # 0:id, 1:channel_id, 2:message_id, 3:original_text, 4:processed_text, 
+        # Индексы колонок таблицы posts (порядок создания + ALTER TABLE):
+        # 0:id, 1:channel_id, 2:message_id, 3:original_text, 4:processed_text,
         # 5:photo_file_id, 6:relevance_score, 7:sentiment, 8:status, 9:source_link,
-        # 10:posted_date, 11:scheduled_date, 12:moderation_notes, 13:ai_analysis, 
-        # 14:error_message, 15:pin_post, 16:created_at, 17:updated_at, 18:created_date, 19:photo_path
-        
+        # 10:posted_date, 11:scheduled_date, 12:moderation_notes, 13:ai_analysis,
+        # 14:error_message, 15:pin_post, 16:created_at, 17:updated_at, 18:created_date,
+        # 19:photo_path (v3), 20:video_file_id (v4), 21:video_path (v4), 22:media_type (v4),
+        # 23:video_duration (v4), 24:video_width (v4), 25:video_height (v4),
+        # 26:extracted_links (v6), 27:media_items (v7)
+
         return Post(
             id=row[0],
             channel_id=row[1],
@@ -802,7 +805,13 @@ class PostCRUD:
             original_text=row[3],
             processed_text=row[4],
             photo_file_id=row[5],
-            photo_path=row[19] if len(row) > 19 else None,  # photo_path в конце таблицы
+            photo_path=row[19] if len(row) > 19 else None,
+            video_file_id=row[20] if len(row) > 20 else None,
+            video_path=row[21] if len(row) > 21 else None,
+            media_type=row[22] if len(row) > 22 else None,
+            video_duration=row[23] if len(row) > 23 else None,
+            video_width=row[24] if len(row) > 24 else None,
+            video_height=row[25] if len(row) > 25 else None,
             relevance_score=row[6],
             sentiment=PostSentiment(row[7]) if row[7] else None,
             status=PostStatus(row[8]),
@@ -815,7 +824,9 @@ class PostCRUD:
             pin_post=row[15] if len(row) > 15 else False,
             created_at=datetime.fromisoformat(row[16]) if row[16] else datetime.now(),
             updated_at=datetime.fromisoformat(row[17]) if row[17] else None,
-            created_date=datetime.fromisoformat(row[18]) if row[18] else datetime.now()
+            created_date=datetime.fromisoformat(row[18]) if row[18] else datetime.now(),
+            extracted_links=row[26] if len(row) > 26 else None,
+            media_items=row[27] if len(row) > 27 else None
         )
 
 

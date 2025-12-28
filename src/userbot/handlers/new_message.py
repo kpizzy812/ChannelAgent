@@ -285,27 +285,28 @@ class NewMessageHandler:
                     if isinstance(msg.media, MessageMediaPhoto):
                         # Загружаем фото
                         media_info = await media_processor.download_photo(
-                            msg.media, 
+                            msg.media,
                             post.id,
                             file_suffix=file_suffix
                         )
-                        
+
                         if media_info:
-                            await self._update_post_media_info(post.id, media_info, 'photo')
+                            # Передаём позицию для сохранения в альбоме
+                            await self._update_post_media_info(post.id, media_info, 'photo', position=i)
                             processed_media_count += 1
                             logger.info("📸 Фото {} загружено для медиа-группы {}", i + 1, grouped_id)
-                        
+
                     elif isinstance(msg.media, MessageMediaDocument):
                         # Проверяем что это видео
                         document = msg.media.document
                         is_video = False
-                        
+
                         if hasattr(document, 'attributes'):
                             for attr in document.attributes:
                                 if isinstance(attr, DocumentAttributeVideo):
                                     is_video = True
                                     break
-                        
+
                         if is_video:
                             # Загружаем видео
                             media_info = await media_processor.download_video(
@@ -313,9 +314,10 @@ class NewMessageHandler:
                                 post.id,
                                 file_suffix=file_suffix
                             )
-                            
+
                             if media_info:
-                                await self._update_post_media_info(post.id, media_info, 'video')
+                                # Передаём позицию для сохранения в альбоме
+                                await self._update_post_media_info(post.id, media_info, 'video', position=i)
                                 processed_media_count += 1
                                 logger.info("🎥 Видео {} загружено для медиа-группы {}", i + 1, grouped_id)
                 
@@ -422,18 +424,37 @@ class NewMessageHandler:
             # Для канала -1002797787404 нужно получить 2797787404
             clean_channel_id = str(abs(channel_id))[3:]  # Убираем -100 (3 символа, не 4!)
             source_link = f"https://t.me/c/{clean_channel_id}/{message_id}"
-            
+
+            # Извлекаем ссылки из сообщения (entities)
+            extracted_links_json = None
+            try:
+                from src.userbot.link_extractor import get_link_extractor
+                import json
+
+                link_extractor = get_link_extractor()
+                extracted_links = link_extractor.extract_links(message)
+
+                if extracted_links:
+                    links_data = link_extractor.to_json_list(extracted_links)
+                    extracted_links_json = json.dumps(links_data, ensure_ascii=False)
+                    logger.debug("Извлечено {} ссылок из поста {}", len(extracted_links), message_id)
+
+            except Exception as e:
+                logger.error("Ошибка извлечения ссылок из поста: {}", str(e))
+
             post_data = {
                 "channel_id": channel_id,
                 "message_id": message_id,
                 "original_text": original_text,
                 "photo_file_id": None,  # Будет установлен позже в media_processor
                 "source_link": source_link,
-                "status": PostStatus.PENDING
+                "status": PostStatus.PENDING,
+                "extracted_links": extracted_links_json
             }
-            
-            logger.debug("Извлечены данные поста: канал={}, сообщение={}, фото={}",
-                        channel_id, message_id, "есть" if has_photo else "нет")
+
+            logger.debug("Извлечены данные поста: канал={}, сообщение={}, фото={}, ссылок={}",
+                        channel_id, message_id, "есть" if has_photo else "нет",
+                        len(extracted_links) if extracted_links else 0)
             
             return post_data
             
@@ -466,17 +487,18 @@ class NewMessageHandler:
                 
                 # Вставляем новый пост
                 cursor = await conn.execute(
-                    """INSERT INTO posts 
-                       (channel_id, message_id, original_text, photo_file_id, 
-                        source_link, status, created_at, created_date) 
-                       VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))""",
+                    """INSERT INTO posts
+                       (channel_id, message_id, original_text, photo_file_id,
+                        source_link, status, extracted_links, created_at, created_date)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))""",
                     (
                         post_data["channel_id"],
-                        post_data["message_id"], 
+                        post_data["message_id"],
                         post_data["original_text"],
                         post_data["photo_file_id"],
                         post_data["source_link"],
-                        post_data["status"].value
+                        post_data["status"].value,
+                        post_data.get("extracted_links")
                     )
                 )
                 
@@ -547,96 +569,127 @@ class NewMessageHandler:
         except Exception as e:
             logger.error("Ошибка обновления last_message_id: {}", str(e))
     
-    async def _update_post_media_info(self, post_id: int, media_info: dict, media_type: str) -> None:
+    async def _update_post_media_info(self, post_id: int, media_info: dict, media_type: str, position: int = 0) -> None:
         """
-        Обновить информацию о медиа для поста
-        
+        Обновить информацию о медиа для поста (добавить в media_items)
+
         Args:
             post_id: ID поста
             media_info: Информация о медиа файле
             media_type: Тип медиа ('photo' или 'video')
+            position: Позиция медиа в альбоме (0-based)
         """
         try:
-            # Создаем JSON строку с информацией о медиа для хранения в БД
-            import json
-            
-            if media_type == 'photo':
-                media_json = json.dumps({
-                    "photo_id": media_info.get("photo_id"),
-                    "access_hash": media_info.get("access_hash"), 
-                    "file_reference": media_info.get("file_reference"),
-                    "photo_path": media_info.get("photo_path"),
-                    "thumbnail_path": media_info.get("thumbnail_path"),
-                    "file_size": media_info.get("file_size"),
-                    "width": media_info.get("width"),
-                    "height": media_info.get("height"),
-                    "format": media_info.get("format"),
-                    "download_date": media_info.get("download_date")
-                })
-                
+            # Определяем путь к файлу
+            file_path = media_info.get("photo_path") if media_type == 'photo' else media_info.get("video_path")
+
+            if not file_path:
+                logger.warning("Путь к файлу не найден для медиа типа {} поста {}", media_type, post_id)
+                return
+
+            # Добавляем медиа в список media_items
+            await self._add_media_to_post(post_id, media_type, file_path, position)
+
+            # Для обратной совместимости: первый элемент также сохраняем в старые поля
+            if position == 0:
                 async with get_db_connection() as conn:
-                    # Обновляем поля для фото
-                    await conn.execute(
-                        """UPDATE posts 
-                           SET photo_file_id = ?, 
-                               photo_path = ?,
-                               media_type = ?,
-                               ai_analysis = COALESCE(ai_analysis, '') || ?
-                           WHERE id = ?""",
-                        (
-                            None,  # photo_file_id остается пустым для локальных файлов
-                            media_info.get("photo_path"),  # Путь к фото файлу
-                            media_type,
-                            f"\nMEDIA_INFO: {media_json}",
-                            post_id
+                    if media_type == 'photo':
+                        await conn.execute(
+                            """UPDATE posts
+                               SET photo_path = ?,
+                                   media_type = ?
+                               WHERE id = ? AND photo_path IS NULL""",
+                            (file_path, media_type, post_id)
                         )
-                    )
-                    await conn.commit()
-                    
-            elif media_type == 'video':
-                media_json = json.dumps({
-                    "video_id": media_info.get("video_id"),
-                    "access_hash": media_info.get("access_hash"),
-                    "file_reference": media_info.get("file_reference"),
-                    "video_path": media_info.get("video_path"),
-                    "thumbnail_path": media_info.get("thumbnail_path"),
-                    "file_size": media_info.get("file_size"),
-                    "duration": media_info.get("duration"),
-                    "width": media_info.get("width"),
-                    "height": media_info.get("height"),
-                    "mime_type": media_info.get("mime_type"),
-                    "download_date": media_info.get("download_date")
-                })
-                
-                async with get_db_connection() as conn:
-                    # Обновляем поля для видео
-                    await conn.execute(
-                        """UPDATE posts 
-                           SET video_file_id = ?,
-                               video_path = ?,
-                               media_type = ?,
-                               video_duration = ?,
-                               video_width = ?,
-                               video_height = ?,
-                               ai_analysis = COALESCE(ai_analysis, '') || ?
-                           WHERE id = ?""",
-                        (
-                            None,  # video_file_id остается пустым для локальных файлов
-                            media_info.get("video_path"),  # Путь к видео файлу
-                            media_type,
-                            media_info.get("duration"),
-                            media_info.get("width"),
-                            media_info.get("height"),
-                            f"\nMEDIA_INFO: {media_json}",
-                            post_id
+                    elif media_type == 'video':
+                        await conn.execute(
+                            """UPDATE posts
+                               SET video_path = ?,
+                                   media_type = ?,
+                                   video_duration = ?,
+                                   video_width = ?,
+                                   video_height = ?
+                               WHERE id = ? AND video_path IS NULL""",
+                            (
+                                file_path,
+                                media_type,
+                                media_info.get("duration"),
+                                media_info.get("width"),
+                                media_info.get("height"),
+                                post_id
+                            )
                         )
-                    )
                     await conn.commit()
-                
-            logger.debug("Обновлена информация о {} для поста {}", media_type, post_id)
-                
+
+            logger.debug("Обновлена информация о {} для поста {} (позиция {})", media_type, post_id, position)
+
         except Exception as e:
             logger.error("Ошибка обновления информации о медиа: {}", str(e))
+
+    async def _add_media_to_post(self, post_id: int, media_type: str, file_path: str, position: int) -> None:
+        """
+        Добавить медиа элемент в список media_items поста
+
+        Args:
+            post_id: ID поста
+            media_type: Тип медиа ('photo' или 'video')
+            file_path: Путь к файлу
+            position: Позиция в альбоме (0-based)
+        """
+        try:
+            async with get_db_connection() as conn:
+                # Получаем текущий media_items
+                cursor = await conn.execute(
+                    "SELECT media_items FROM posts WHERE id = ?",
+                    (post_id,)
+                )
+                row = await cursor.fetchone()
+
+                if not row:
+                    logger.error("Пост {} не найден для добавления медиа", post_id)
+                    return
+
+                current_items = row[0]
+
+                # Парсим существующий JSON или создаем новый список
+                if current_items:
+                    try:
+                        items = json.loads(current_items)
+                    except json.JSONDecodeError:
+                        items = []
+                else:
+                    items = []
+
+                # Проверяем нет ли уже такого элемента (по пути)
+                for item in items:
+                    if item.get('path') == file_path:
+                        logger.debug("Медиа {} уже добавлен в пост {}", file_path, post_id)
+                        return
+
+                # Добавляем новый элемент
+                new_item = {
+                    "type": media_type,
+                    "path": file_path,
+                    "position": position
+                }
+                items.append(new_item)
+
+                # Сортируем по позиции
+                items = sorted(items, key=lambda x: x.get('position', 0))
+
+                # Сохраняем обратно в БД
+                media_items_json = json.dumps(items, ensure_ascii=False)
+                await conn.execute(
+                    "UPDATE posts SET media_items = ? WHERE id = ?",
+                    (media_items_json, post_id)
+                )
+                await conn.commit()
+
+                logger.debug("Добавлен медиа элемент в пост {}: {} (позиция {}, всего {})",
+                            post_id, media_type, position, len(items))
+
+        except Exception as e:
+            logger.error("Ошибка добавления медиа в пост {}: {}", post_id, str(e))
     
     async def _send_notification_to_owner(self, post: Post, media_processor) -> None:
         """
@@ -655,14 +708,19 @@ class NewMessageHandler:
             bot = get_bot_instance()
             
             logger.info("Отправка уведомления о новом посте {} владельцу", post.unique_id)
-            
+
             # Создаем уведомление с оригинальным текстом (БЕЗ AI анализа)
             notification_text = self._format_new_post_notification(post)
-            
+
             # Получаем клавиатуру модерации
             keyboard = get_post_moderation_keyboard(post.id)
-            
-            # Если есть медиа, отправляем с медиа
+
+            # Проверяем наличие альбома (более 1 медиа)
+            if post.has_album:
+                await self._send_album_notification(bot, config, post, keyboard)
+                return
+
+            # Если есть медиа, отправляем с медиа (одиночное)
             if post.has_photo:
                 try:
                     from pathlib import Path
@@ -885,7 +943,108 @@ class NewMessageHandler:
             
         except Exception as e:
             logger.error("Ошибка отправки текстового уведомления: {}", str(e))
-    
+
+    async def _send_album_notification(self, bot, config, post: Post, keyboard) -> None:
+        """
+        Отправить уведомление о новом посте с альбомом (media_group)
+
+        Args:
+            bot: Экземпляр бота
+            config: Конфигурация
+            post: Объект поста с альбомом
+            keyboard: Клавиатура модерации
+        """
+        try:
+            from pathlib import Path
+            from aiogram.types import FSInputFile, InputMediaPhoto, InputMediaVideo
+
+            media_items = post.get_media_items()
+            if not media_items:
+                logger.warning("Нет медиа элементов для альбома поста {}", post.id)
+                await self._send_text_notification(
+                    bot, config, post, keyboard,
+                    self._format_new_post_notification(post)
+                )
+                return
+
+            # Формируем caption для первого элемента
+            caption = self._format_post_caption_with_original_text(post)
+
+            # Ограничение Telegram на caption в media_group: 1024 символа
+            if len(caption) > 1024:
+                from src.utils.html_formatter import bold
+                caption = f"""📝 {bold(f'Новый альбом #{post.id}')} ({len(media_items)} медиа)
+📺 Канал: ID {post.channel_id}
+
+📄 Текст слишком длинный - см. кнопку ниже"""
+
+            # Собираем список InputMedia
+            media_group = []
+            for i, item in enumerate(media_items):
+                file_path = Path(item.get('path', ''))
+                media_type = item.get('type', 'photo')
+
+                if not file_path.exists():
+                    logger.warning("Файл не найден для альбома: {}", file_path)
+                    continue
+
+                file_input = FSInputFile(file_path)
+
+                # Caption только у первого элемента
+                item_caption = caption if i == 0 else None
+                parse_mode = "HTML" if i == 0 else None
+
+                if media_type == 'photo':
+                    media_group.append(InputMediaPhoto(
+                        media=file_input,
+                        caption=item_caption,
+                        parse_mode=parse_mode
+                    ))
+                elif media_type == 'video':
+                    media_group.append(InputMediaVideo(
+                        media=file_input,
+                        caption=item_caption,
+                        parse_mode=parse_mode
+                    ))
+
+            if len(media_group) < 2:
+                # Если осталось меньше 2 элементов - отправляем как обычный пост
+                logger.warning("Недостаточно медиа для альбома поста {}, отправляем как обычный", post.id)
+                notification_text = self._format_new_post_notification(post)
+                await self._send_text_notification(bot, config, post, keyboard, notification_text)
+                return
+
+            # Отправляем альбом
+            await bot.send_media_group(
+                chat_id=config.OWNER_ID,
+                media=media_group
+            )
+
+            # Кнопки отправляем отдельным сообщением (media_group не поддерживает reply_markup)
+            from src.utils.html_formatter import bold
+            buttons_text = f"""📎 {bold(f'Альбом #{post.id}')} ({len(media_group)} медиа)
+
+⚡️ Выберите действие:"""
+
+            await bot.send_message(
+                chat_id=config.OWNER_ID,
+                text=buttons_text,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+
+            logger.info("📎 Уведомление об альбоме {} ({} медиа) отправлено владельцу",
+                       post.id, len(media_group))
+
+        except Exception as e:
+            logger.error("Ошибка отправки альбома для поста {}: {}", post.id, str(e))
+            # Fallback на текстовое уведомление
+            try:
+                notification_text = self._format_new_post_notification(post)
+                await self._send_text_notification(bot, config, post, keyboard, notification_text)
+            except Exception as fallback_error:
+                logger.error("Fallback также не удался: {}", str(fallback_error))
+
     def get_statistics(self) -> dict:
         """Получить статистику обработчика"""
         return {

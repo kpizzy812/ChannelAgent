@@ -308,7 +308,7 @@ async def test_system_components() -> bool:
             from pathlib import Path
             
             # Проверяем наличие файла сессии
-            session_file = Path("data/userbot_session.session")
+            session_file = Path("data/userbot_session.txt")
             if session_file.exists():
                 test_results['userbot_auth'] = True
                 logger.info("✅ UserBot сессия найдена")

@@ -20,6 +20,7 @@ from src.bot.filters.owner import owner_filter
 from src.bot.states.fsm import UserbotAuthStates
 from src.utils.exceptions import UserbotError
 from src.userbot.auth_manager import get_auth_manager, AuthStatus, reset_auth_manager
+from src.userbot.publisher import reset_userbot_publisher
 from src.utils.html_formatter import (
     bold, code, format_success_message, format_error_message,
     format_warning_message, format_info_message, format_list_items,
@@ -553,7 +554,10 @@ async def confirm_reset_userbot_callback(callback: CallbackQuery) -> None:
         
         # Выполняем полный сброс
         result = await reset_auth_manager()
-        
+
+        # Сбрасываем кеш UserbotPublisher чтобы он пересоздался с новым клиентом
+        reset_userbot_publisher()
+
         if result.success:
             await callback.message.edit_text(
                 format_success_message(
