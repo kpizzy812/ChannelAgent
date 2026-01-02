@@ -41,6 +41,9 @@ logs/
 # (база данных, сессия UserBot, медиа файлы)
 data/
 
+# Локальные бэкапы БД
+backups/
+
 # macOS системные файлы
 .DS_Store
 .AppleDouble

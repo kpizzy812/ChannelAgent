@@ -17,6 +17,35 @@ from src.utils.exceptions import TelegramParsingError
 logger = logger.bind(module="telegram_parser")
 
 
+def _utf16_offset_to_python(text: str, utf16_offset: int) -> int:
+    """
+    Конвертирует UTF-16 offset (используемый Telegram API) в Python string offset.
+
+    Telegram API использует UTF-16 code units для offset'ов в entities.
+    Символы вне BMP (например эмодзи 🟠) занимают 2 UTF-16 code units,
+    но только 1 символ в Python строке.
+
+    Args:
+        text: Исходный текст
+        utf16_offset: Offset в UTF-16 code units
+
+    Returns:
+        Offset в Python символах
+    """
+    # Кодируем текст в UTF-16 LE (без BOM)
+    utf16_bytes = text.encode('utf-16-le')
+
+    # Находим позицию в байтах (2 байта на UTF-16 code unit)
+    byte_offset = utf16_offset * 2
+
+    # Декодируем текст до этой позиции чтобы получить Python offset
+    if byte_offset > len(utf16_bytes):
+        byte_offset = len(utf16_bytes)
+
+    prefix_text = utf16_bytes[:byte_offset].decode('utf-16-le', errors='replace')
+    return len(prefix_text)
+
+
 class TelegramLinkParser:
     """Парсер ссылок Telegram"""
     
@@ -428,37 +457,43 @@ def get_post_extractor() -> TelegramPostExtractor:
 def format_entities_to_html(text: str, entities: list) -> str:
     """
     Конвертирует MessageEntity в HTML формат для Telegram
-    
+
+    ВАЖНО: Корректно обрабатывает UTF-16 offset'ы которые использует Telegram API.
+
     Args:
         text: Исходный текст
         entities: Список MessageEntity из aiogram
-        
+
     Returns:
         Текст в HTML формате
     """
     try:
         if not entities:
             return text
-        
+
         # Сортируем entities по offset для правильной обработки
         sorted_entities = sorted(entities, key=lambda e: e.offset)
-        
+
         # Список для накопления результата
         result = []
-        last_offset = 0
-        
+        last_python_offset = 0
+
         for entity in sorted_entities:
+            # КРИТИЧНО: конвертируем UTF-16 offset в Python offset
+            start = _utf16_offset_to_python(text, entity.offset)
+            end = _utf16_offset_to_python(text, entity.offset + entity.length)
+
             # Добавляем текст до entity
-            if entity.offset > last_offset:
-                result.append(text[last_offset:entity.offset])
-            
-            # Извлекаем текст entity
-            entity_text = text[entity.offset:entity.offset + entity.length]
-            
+            if start > last_python_offset:
+                result.append(text[last_python_offset:start])
+
+            # Извлекаем текст entity с правильными Python offset'ами
+            entity_text = text[start:end]
+
             # Экранируем HTML символы в тексте
             from html import escape
             escaped_text = escape(entity_text)
-            
+
             # Добавляем соответствующие теги
             if entity.type == "bold":
                 result.append(f"<b>{escaped_text}</b>")
@@ -483,15 +518,15 @@ def format_entities_to_html(text: str, entities: list) -> str:
                 # Для неизвестных типов просто добавляем текст
                 logger.debug("Неизвестный тип entity: {}, добавляем как обычный текст", entity.type)
                 result.append(escaped_text)
-            
-            last_offset = entity.offset + entity.length
-        
+
+            last_python_offset = end
+
         # Добавляем оставшийся текст
-        if last_offset < len(text):
-            result.append(text[last_offset:])
-        
+        if last_python_offset < len(text):
+            result.append(text[last_python_offset:])
+
         return ''.join(result)
-        
+
     except Exception as e:
         logger.error("Ошибка конвертации entities в HTML: {}", str(e))
         from html import escape
@@ -527,6 +562,140 @@ def extract_formatted_text(text: str, entities: list) -> str:
         logger.error("Ошибка извлечения форматированного текста: {}", str(e))
         from html import escape
         return escape(text)
+
+
+def entities_to_telethon_markdown(text: str, entities: list) -> str:
+    """
+    Конвертирует aiogram MessageEntity в Telethon Markdown формат
+
+    ВАЖНО: Корректно обрабатывает UTF-16 offset'ы которые использует Telegram API.
+    Эмодзи и другие символы вне BMP занимают 2 UTF-16 code units, но 1 Python символ.
+
+    Telethon Markdown синтаксис:
+    - Bold: **текст**
+    - Italic: __текст__ (двойное подчёркивание)
+    - Code: `текст`
+    - Strike: ~~текст~~
+    - Spoiler: [текст](spoiler)
+    - Link: [текст](url)
+
+    Args:
+        text: Исходный текст сообщения
+        entities: Список MessageEntity из aiogram
+
+    Returns:
+        Текст с Telethon Markdown разметкой
+    """
+    try:
+        if not entities:
+            return text
+
+        # Сортируем entities по offset в обратном порядке
+        # чтобы вставлять разметку с конца и не сбивать offsets
+        sorted_entities = sorted(entities, key=lambda e: e.offset, reverse=True)
+
+        result = text
+
+        for entity in sorted_entities:
+            # КРИТИЧНО: конвертируем UTF-16 offset в Python offset
+            utf16_start = entity.offset
+            utf16_end = entity.offset + entity.length
+
+            start = _utf16_offset_to_python(text, utf16_start)
+            end = _utf16_offset_to_python(text, utf16_end)
+
+            # Извлекаем текст entity из ОРИГИНАЛЬНОГО текста с правильными offset'ами
+            entity_text = text[start:end]
+
+            # Определяем тип entity и применяем соответствующую разметку
+            entity_type = getattr(entity, 'type', None)
+
+            if entity_type == "bold":
+                replacement = f"**{entity_text}**"
+            elif entity_type == "italic":
+                replacement = f"__{entity_text}__"
+            elif entity_type == "code":
+                replacement = f"`{entity_text}`"
+            elif entity_type == "pre":
+                # Для pre используем тройные backticks
+                replacement = f"```\n{entity_text}\n```"
+            elif entity_type == "strikethrough":
+                replacement = f"~~{entity_text}~~"
+            elif entity_type == "underline":
+                # Telethon не поддерживает underline в Markdown, используем как есть
+                replacement = entity_text
+            elif entity_type == "spoiler":
+                replacement = f"[{entity_text}](spoiler)"
+            elif entity_type == "text_link":
+                url = getattr(entity, 'url', '')
+                replacement = f"[{entity_text}]({url})"
+            elif entity_type == "blockquote":
+                # Добавляем > перед каждой строкой
+                lines = entity_text.split('\n')
+                quoted_lines = ['>' + line for line in lines]
+                replacement = '\n'.join(quoted_lines)
+            else:
+                # Для неизвестных типов оставляем как есть
+                logger.debug("Неизвестный тип entity для Markdown: {}", entity_type)
+                replacement = entity_text
+
+            # Заменяем текст с разметкой - используем Python offset'ы для result
+            # Так как мы обрабатываем с конца, result ещё не изменён в этой позиции
+            result = result[:start] + replacement + result[end:]
+
+        logger.debug("Конвертация в Telethon Markdown: {} -> {} символов",
+                    len(text), len(result))
+        return result
+
+    except Exception as e:
+        logger.error("Ошибка конвертации entities в Telethon Markdown: {}", str(e))
+        return text  # Fallback к исходному тексту
+
+
+def extract_aiogram_formatting(message) -> str:
+    """
+    Извлекает форматирование из aiogram Message в Telethon Markdown формат
+
+    Эта функция нужна для сохранения пользовательского форматирования
+    при создании шаблонов daily posts.
+
+    Args:
+        message: aiogram Message объект
+
+    Returns:
+        Текст с Telethon Markdown разметкой
+    """
+    try:
+        # Получаем текст и entities
+        if message.text:
+            raw_text = message.text
+            entities = message.entities
+        elif message.caption:
+            raw_text = message.caption
+            entities = message.caption_entities
+        else:
+            return ""
+
+        if not raw_text:
+            return ""
+
+        # Если нет entities, возвращаем как есть
+        if not entities:
+            logger.debug("Нет entities, возвращаем сырой текст: {} символов", len(raw_text))
+            return raw_text
+
+        # Конвертируем entities в Telethon Markdown
+        formatted = entities_to_telethon_markdown(raw_text, entities)
+
+        logger.info("Извлечено форматирование: {} entities, {} -> {} символов",
+                   len(entities), len(raw_text), len(formatted))
+
+        return formatted
+
+    except Exception as e:
+        logger.error("Ошибка извлечения форматирования aiogram: {}", str(e))
+        # Fallback
+        return message.text or message.caption or ""
 
 
 def validate_telegram_html(html_text: str) -> str:

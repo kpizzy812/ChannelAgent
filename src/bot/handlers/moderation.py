@@ -1506,7 +1506,7 @@ async def publish_post_now(post_id: int, use_premium_emoji: bool = True) -> bool
                     if message_id:
                         # Обновляем статус поста
                         await post_crud.update_post_status(post_id, PostStatus.POSTED)
-                        await post_crud.update_post(post_id, posted_date=datetime.now())
+                        await post_crud.update_post(post_id, posted_date=datetime.now(), published_message_id=message_id)
                         logger.info("Пост {} опубликован через UserBot, message_id: {}",
                                    post_id, message_id)
                         return True
@@ -1566,8 +1566,8 @@ async def publish_post_now(post_id: int, use_premium_emoji: bool = True) -> bool
             
             # Обновляем статус поста
             await post_crud.update_post_status(post_id, PostStatus.POSTED)
-            await post_crud.update_post(post_id, posted_date=datetime.now())
-            
+            await post_crud.update_post(post_id, posted_date=datetime.now(), published_message_id=sent_message.message_id)
+
             # Проверяем нужно ли закрепить пост (только для ежедневных постов)
             try:
                 # Получаем информацию о посте для проверки флага pin_post

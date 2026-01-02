@@ -353,12 +353,62 @@ class BotMediaHandler:
     def cleanup_invalid_photos(self) -> int:
         """
         Очистка невалидных файлов фото (устаревший метод, используйте cleanup_invalid_media)
-        
+
         Returns:
             Количество удаленных файлов
         """
         logger.warning("cleanup_invalid_photos устарел, используйте cleanup_invalid_media")
         return self.cleanup_invalid_media()
+
+    async def download_photo_by_file_id(self, file_id: str) -> Optional[str]:
+        """
+        Скачать фото по Telegram file_id через Bot API
+
+        Args:
+            file_id: Telegram file_id фото
+
+        Returns:
+            Путь к скачанному файлу или None при ошибке
+        """
+        try:
+            # Получаем экземпляр бота
+            from src.bot.main import get_bot_instance
+            bot = get_bot_instance()
+
+            if not bot:
+                logger.error("Bot instance недоступен для скачивания фото")
+                return None
+
+            # Создаём директорию для временных файлов
+            temp_dir = self.media_dir / "temp"
+            temp_dir.mkdir(parents=True, exist_ok=True)
+
+            # Получаем информацию о файле
+            file_info = await bot.get_file(file_id)
+
+            if not file_info or not file_info.file_path:
+                logger.error("Не удалось получить информацию о файле: {}", file_id)
+                return None
+
+            # Формируем путь для сохранения
+            # Используем часть file_id для уникальности
+            file_ext = Path(file_info.file_path).suffix or ".jpg"
+            local_filename = f"daily_{file_id[-20:]}{file_ext}"
+            local_path = temp_dir / local_filename
+
+            # Скачиваем файл
+            await bot.download_file(file_info.file_path, destination=str(local_path))
+
+            if local_path.exists() and local_path.stat().st_size > 0:
+                logger.info("Фото скачано по file_id: {} -> {}", file_id[:20], local_path)
+                return str(local_path)
+            else:
+                logger.error("Файл не скачан или пустой: {}", local_path)
+                return None
+
+        except Exception as e:
+            logger.error("Ошибка скачивания фото по file_id {}: {}", file_id[:20], str(e))
+            return None
 
 
 # Глобальный экземпляр обработчика

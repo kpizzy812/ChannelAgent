@@ -607,6 +607,43 @@ class DatabaseMigrator:
             logger.error(error_msg)
             raise DatabaseMigrationError("v7", error_msg)
 
+    async def run_migration_v9(self) -> None:
+        """Миграция версии 9 - добавление поля published_message_id для хранения ID опубликованного поста"""
+        logger.info("Выполняется миграция v9: добавление поля published_message_id")
+
+        try:
+            async with get_db_transaction() as conn:
+                # Проверяем существует ли таблица posts
+                cursor = await conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='posts'"
+                )
+                table_exists = await cursor.fetchone()
+
+                if not table_exists:
+                    logger.info("Таблица posts не существует, пропускаем миграцию v9")
+                    await self.set_version(9, "Пропущена - таблица не создана")
+                    return
+
+                # Проверяем существует ли уже поле published_message_id
+                cursor = await conn.execute("PRAGMA table_info(posts)")
+                columns = await cursor.fetchall()
+                column_names = [col[1] for col in columns]
+
+                if 'published_message_id' not in column_names:
+                    await conn.execute("ALTER TABLE posts ADD COLUMN published_message_id BIGINT")
+                    logger.debug("Добавлено поле published_message_id в таблицу posts")
+                    logger.info("Поле published_message_id добавлено для хранения ID опубликованных постов")
+                else:
+                    logger.info("Поле published_message_id уже существует в таблице posts")
+
+            await self.set_version(9, "Добавлено поле published_message_id для ссылок на опубликованные посты")
+            logger.info("Миграция v9 выполнена успешно")
+
+        except Exception as e:
+            error_msg = f"Ошибка выполнения миграции v9: {str(e)}"
+            logger.error(error_msg)
+            raise DatabaseMigrationError("v9", error_msg)
+
     async def run_all_migrations(self) -> None:
         """Выполнить все необходимые миграции"""
         logger.info("Начало выполнения миграций БД")
@@ -628,7 +665,8 @@ class DatabaseMigrator:
                 (5, self.run_migration_v5, "Добавление таблицы custom_emojis для Premium эмодзи"),
                 (6, self.run_migration_v6, "Добавление поля extracted_links для ссылок из постов"),
                 (7, self.run_migration_v7, "Добавление поля media_items для хранения альбомов"),
-                (8, self.run_migration_v8, "Добавление кэша CoinGecko и retry_count для постов")
+                (8, self.run_migration_v8, "Добавление кэша CoinGecko и retry_count для постов"),
+                (9, self.run_migration_v9, "Добавление поля published_message_id для ссылок на опубликованные посты")
             ]
             
             for version, migration_func, description in migrations:

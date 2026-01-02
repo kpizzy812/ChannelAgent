@@ -640,20 +640,21 @@ async def get_total_market_cap() -> Optional[Dict[str, Any]]:
 
 
 def format_price(price: float) -> str:
-    """Форматировать цену криптовалюты"""
+    """Форматировать цену криптовалюты (моноширинный шрифт)"""
     if price >= 1000:
-        return f"${price:,.0f}"
+        return f"`${price:,.0f}`"
     elif price >= 1:
-        return f"${price:,.2f}"
+        return f"`${price:,.2f}`"
     else:
-        return f"${price:.6f}".rstrip('0').rstrip('.')
+        formatted = f"${price:.6f}".rstrip('0').rstrip('.')
+        return f"`{formatted}`"
 
 
 def format_change(change: float) -> str:
-    """Форматировать изменение цены"""
+    """Форматировать изменение цены (эмодзи + моноширинный)"""
     sign = "+" if change > 0 else ""
     emoji = "📈" if change > 0 else "📉" if change < 0 else "➡️"
-    return f"{emoji} {sign}{change:.1f}%"
+    return f"{emoji} `{sign}{change:.1f}%`"
 
 
 async def get_template_variables() -> Dict[str, str]:
@@ -734,21 +735,38 @@ async def get_template_variables() -> Dict[str, str]:
             global_data = crypto_data.get('global', {})
             
             if global_data:
-                # Доминация BTC
+                # Доминация BTC (моноширинный)
                 btc_dominance = global_data.get('market_cap_percentage', {}).get('btc', 0)
                 if btc_dominance:
-                    variables['BTC_DOMINANCE'] = f"{btc_dominance:.1f}%"
-                    variables['BITCOIN_DOMINANCE'] = f"{btc_dominance:.1f}%"
-                
-                # Капитализация рынка
+                    variables['BTC_DOMINANCE'] = f"`{btc_dominance:.1f}%`"
+                    variables['BITCOIN_DOMINANCE'] = f"`{btc_dominance:.1f}%`"
+
+                # Капитализация рынка (моноширинный)
                 market_cap = global_data.get('total_market_cap', {}).get('usd', 0)
                 market_cap_change = global_data.get('market_cap_change_percentage_24h_usd', 0)
-                
+
                 if market_cap:
                     market_cap_t = market_cap / 1_000_000_000_000
-                    variables['MARKET_CAP'] = f"${market_cap_t:.2f}T"
+                    variables['MARKET_CAP'] = f"`${market_cap_t:.2f}T`"
+                    variables['MARKETCAP'] = variables['MARKET_CAP']  # Алиас
                     variables['MARKET_CHANGE'] = format_change(market_cap_change)
-                    variables['MARKET_CHANGE_NUM'] = f"{market_cap_change:+.1f}"
+                    variables['MARKET_CHANGE_NUM'] = f"`{market_cap_change:+.1f}`"
+
+            # Алиасы для удобства (без подчёркивания)
+            if 'BTC_DOMINANCE' in variables:
+                variables['BTCDOMINANCE'] = variables['BTC_DOMINANCE']
+            if 'BTC_PRICE' in variables:
+                variables['BTCPRICE'] = variables['BTC_PRICE']
+            if 'ETH_PRICE' in variables:
+                variables['ETHPRICE'] = variables['ETH_PRICE']
+            if 'SOL_PRICE' in variables:
+                variables['SOLPRICE'] = variables['SOL_PRICE']
+            if 'BTC_CHANGE' in variables:
+                variables['BTCCHANGE'] = variables['BTC_CHANGE']
+            if 'ETH_CHANGE' in variables:
+                variables['ETHCHANGE'] = variables['ETH_CHANGE']
+            if 'SOL_CHANGE' in variables:
+                variables['SOLCHANGE'] = variables['SOL_CHANGE']
         else:
             logger.warning("Не удалось получить данные CoinGecko для переменных")
         

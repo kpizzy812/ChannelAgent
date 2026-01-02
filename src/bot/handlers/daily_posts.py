@@ -1496,8 +1496,9 @@ async def process_template_name(message: Message, state: FSMContext):
 async def process_template_text(message: Message, state: FSMContext):
     """Обработка текста шаблона с сохранением форматирования"""
     try:
-        # Извлекаем текст из любого типа сообщения
-        template_text = message.text or message.caption or ""
+        # Извлекаем текст с сохранением форматирования (entities -> Telethon Markdown)
+        from src.utils.telegram_parser import extract_aiogram_formatting
+        template_text = extract_aiogram_formatting(message)
         
         if not template_text.strip():
             await message.answer(
@@ -2025,28 +2026,24 @@ async def delete_template_confirm(callback: CallbackQuery):
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
-                InlineKeyboardButton(text="🗑 Да, удалить", callback_data=f"confirm_delete_{template_name}"),
+                InlineKeyboardButton(text="🗑 Да, удалить", callback_data=f"del_tmpl_confirm_{template_name}"),
                 InlineKeyboardButton(text="❌ Нет, отмена", callback_data=f"manage_template_{template_name}")
             ],
             [InlineKeyboardButton(text="🔙 К списку шаблонов", callback_data="daily_templates")]
         ])
         
-        await callback.message.edit_text(
-            text,
-            reply_markup=keyboard,
-            parse_mode="Markdown"
-        )
-        
+        await safe_edit_message(callback, text, reply_markup=keyboard, parse_mode="Markdown")
+
     except Exception as e:
         logger.error("Ошибка подтверждения удаления шаблона: {}", str(e))
         await callback.answer("❌ Ошибка", show_alert=True)
 
 
-@router.callback_query(lambda c: c.data.startswith("confirm_delete_"))
+@router.callback_query(lambda c: c.data.startswith("del_tmpl_confirm_"))
 async def delete_template_final(callback: CallbackQuery):
     """Окончательное удаление шаблона"""
     try:
-        template_name = callback.data.replace("confirm_delete_", "")
+        template_name = callback.data.replace("del_tmpl_confirm_", "")
         
         template_manager = get_template_manager()
         success = await template_manager.remove_custom_template(template_name)
@@ -2067,13 +2064,9 @@ async def delete_template_final(callback: CallbackQuery):
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔙 К списку шаблонов", callback_data="daily_templates")]
         ])
-        
-        await callback.message.edit_text(
-            text,
-            reply_markup=keyboard,
-            parse_mode="Markdown"
-        )
-        
+
+        await safe_edit_message(callback, text, reply_markup=keyboard, parse_mode="Markdown")
+
         logger.info("Пользователь {} {} шаблон '{}'", 
                    callback.from_user.id, 
                    "удалил" if success else "не смог удалить", 
@@ -2113,16 +2106,12 @@ async def copy_template_as_base(callback: CallbackQuery, state: FSMContext):
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="❌ Отменить копирование", callback_data=f"manage_template_{template_name}")]
         ])
-        
-        await callback.message.edit_text(
-            text,
-            reply_markup=keyboard,
-            parse_mode="Markdown"
-        )
-        
+
+        await safe_edit_message(callback, text, reply_markup=keyboard, parse_mode="Markdown")
+
         # Устанавливаем состояние ожидания названия для копии
         await state.set_state(DailyPostStates.entering_copy_name)
-        
+
     except Exception as e:
         logger.error("Ошибка копирования шаблона: {}", str(e))
         await callback.answer("❌ Ошибка", show_alert=True)
@@ -2429,8 +2418,9 @@ async def process_edit_template_name(message: Message, state: FSMContext):
 async def process_edit_template_text(message: Message, state: FSMContext):
     """Обработка нового текста шаблона"""
     try:
-        # Извлекаем текст
-        new_text = message.text or message.caption or ""
+        # Извлекаем текст с сохранением форматирования (entities -> Telethon Markdown)
+        from src.utils.telegram_parser import extract_aiogram_formatting
+        new_text = extract_aiogram_formatting(message)
         
         if not new_text.strip():
             await message.answer(
@@ -2450,10 +2440,9 @@ async def process_edit_template_text(message: Message, state: FSMContext):
         data = await state.get_data()
         old_name = data.get('editing_template_name', '')
         new_name = data.get('new_template_name', old_name)
-        
-        # Получаем форматированный текст
-        formatted_text = await _extract_formatted_text_from_message(message)
-        
+
+        # new_text уже содержит форматированный текст (Telethon Markdown)
+
         # Информация о фото
         photo_info = None
         if message.photo:

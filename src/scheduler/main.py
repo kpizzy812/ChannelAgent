@@ -21,6 +21,7 @@ from apscheduler.job import Job
 from src.scheduler.tasks.monitoring import check_monitoring_health
 from src.scheduler.tasks.daily_posts import create_daily_crypto_post
 from src.scheduler.tasks.weekly_posts import create_weekly_market_overview
+from src.scheduler.tasks.summary_posts import create_daily_summary_post
 from src.scheduler.tasks.cleanup import cleanup_old_posts
 from src.scheduler.tasks.delayed_posts import process_scheduled_posts
 from src.scheduler.tasks.template_autopublish import process_template_autopublish
@@ -210,7 +211,19 @@ class ChannelAgentScheduler:
             # 7. Еженедельный обзор рынка (SyntraAI) - читаем день и время из БД
             await self._add_weekly_analytics_job()
 
-            # 8. Автопубликация шаблонов (ОТКЛЮЧЕНО чтобы избежать дублирования с daily_posts)
+            # 8. Ежедневный Summary пост (22:00 UTC+3)
+            self.scheduler.add_job(
+                create_daily_summary_post,
+                'cron',
+                hour=22,
+                minute=0,
+                id='daily_summary_post',
+                name='Ежедневный Summary пост',
+                replace_existing=True
+            )
+            logger.info("✅ Добавлена задача ежедневного Summary поста: 22:00 UTC+3")
+
+            # 9. Автопубликация шаблонов (ОТКЛЮЧЕНО чтобы избежать дублирования с daily_posts)
             # self.scheduler.add_job(
             #     process_template_autopublish,
             #     'interval',

@@ -145,133 +145,164 @@ async def check_template_published_today(template_name: str) -> bool:
 
 async def publish_template_post(template_info: Dict[str, Any]) -> bool:
     """
-    Опубликовать пост из шаблона
-    
+    Опубликовать пост из шаблона через UserBot (с fallback на Bot API)
+
     Args:
         template_info: Информация о шаблоне
-        
+
     Returns:
         True если пост опубликован успешно
     """
     try:
         logger.info("📤 Автопубликация поста из шаблона '{}'", template_info['name'])
-        
+
         config = get_config()
         target_channel_id = config.TARGET_CHANNEL_ID
-        
+
         if not target_channel_id:
             logger.error("TARGET_CHANNEL_ID не настроен")
             return False
-        
+
         # Рендерим шаблон
         template_manager = get_template_manager()
         post_content = await template_manager.render_template(template_info['name'])
-        
+
         if not post_content:
             logger.error("Не удалось отрендерить шаблон '{}'", template_info['name'])
             return False
-        
+
         # Создаем пост в БД
         post = await save_template_auto_post(
-            template_info['name'], 
-            post_content, 
+            template_info['name'],
+            post_content,
             template_info.get('pin_enabled', False)
         )
-        
+
         if not post:
             logger.error("Не удалось сохранить пост в БД")
             return False
-        
-        # Получаем экземпляр бота
-        bot = get_bot_instance()
 
-        # Добавляем футер с полезными ссылками (Markdown режим)
-        post_content = add_footer_to_post(post_content, parse_mode="Markdown")
+        # Получаем информацию о фото из шаблона
+        template = await template_manager.get_template(template_info['name'])
+        photo_file_id = None
+        if template and template.photo_info:
+            photo_file_id = template.photo_info.get('file_id')
 
-        # Публикуем пост в целевой канал
+        sent_message = None
+        pin_enabled = template_info.get('pin_enabled', False)
+
+        # Пробуем опубликовать через UserBot с Premium Emoji
         try:
-            # Получаем информацию о фото из шаблона
-            sent_message = None
-            template_manager = get_template_manager()
-            template = await template_manager.get_template(template_info['name'])
+            from src.userbot.publisher import get_userbot_publisher
 
-            if template and template.photo_info and template.photo_info.get('file_id'):
+            publisher = await get_userbot_publisher()
+
+            if publisher and publisher.is_available:
+                logger.info("Публикуем автопост из шаблона '{}' через UserBot с Premium Emoji",
+                           template_info['name'])
+
+                # Получаем путь к фото если есть
+                photo_path = None
+                if photo_file_id:
+                    try:
+                        from src.bot.media_handler import get_media_handler
+                        media_handler = get_media_handler()
+                        photo_path = await media_handler.download_photo_by_file_id(photo_file_id)
+                        if photo_path:
+                            logger.info("Фото скачано для UserBot публикации: {}", photo_path)
+                    except Exception as download_error:
+                        logger.warning("Не удалось скачать фото: {}", str(download_error))
+
+                # Публикуем через UserBot (футер добавляется внутри publisher.publish_post)
+                message_id = await publisher.publish_post(
+                    channel_id=target_channel_id,
+                    text=post_content,
+                    photo_path=photo_path,
+                    pin_post=pin_enabled,
+                    add_footer=True
+                )
+
+                if message_id:
+                    logger.info("✅ Автопост из шаблона '{}' опубликован через UserBot, message_id: {}",
+                               template_info['name'], message_id)
+                    # Создаём фейковый объект для совместимости
+                    class FakeMessage:
+                        def __init__(self, msg_id):
+                            self.message_id = msg_id
+                    sent_message = FakeMessage(message_id)
+                else:
+                    logger.warning("Не удалось опубликовать через UserBot, fallback на Bot API")
+            else:
+                logger.debug("UserbotPublisher недоступен, используем Bot API")
+
+        except Exception as userbot_error:
+            logger.warning("Ошибка публикации через UserBot: {}, fallback на Bot API",
+                          str(userbot_error))
+
+        # Fallback: публикация через Bot API (без Premium Emoji)
+        if not sent_message:
+            logger.info("Публикуем автопост через Bot API (без Premium Emoji)")
+
+            # Получаем экземпляр бота
+            bot = get_bot_instance()
+
+            # Конвертируем Telethon Markdown -> HTML для Bot API
+            from src.utils.post_footer import convert_markdown_to_html
+            content_html = convert_markdown_to_html(post_content)
+
+            # Добавляем футер (HTML режим для Bot API)
+            content_with_footer = add_footer_to_post(content_html, parse_mode="HTML")
+
+            if photo_file_id:
                 # Публикуем с фото
                 logger.info("📸 Публикуем автопост с фото из шаблона '{}'", template_info['name'])
                 sent_message = await bot.send_photo(
                     chat_id=target_channel_id,
-                    photo=template.photo_info['file_id'],
-                    caption=post_content,
-                    parse_mode="Markdown"
+                    photo=photo_file_id,
+                    caption=content_with_footer,
+                    parse_mode="HTML"
                 )
             else:
                 # Публикуем текстовый пост
                 logger.info("📝 Публикуем текстовый автопост из шаблона '{}'", template_info['name'])
                 sent_message = await bot.send_message(
                     chat_id=target_channel_id,
-                    text=post_content,
-                    parse_mode="Markdown"
+                    text=content_with_footer,
+                    parse_mode="HTML"
                 )
-            
-            # Проверяем нужно ли закрепить пост
-            if sent_message and template_info.get('pin_enabled', False):
+
+            # Закрепляем пост через Bot API (UserBot делает это сам)
+            if sent_message and pin_enabled:
                 try:
                     await bot.pin_chat_message(
                         chat_id=target_channel_id,
                         message_id=sent_message.message_id,
                         disable_notification=True
                     )
-                    logger.info("📌 Пост из шаблона '{}' закреплен в канале", template_info['name'])
-                    
-                    # Автоматически удаляем системное сообщение о закреплении
-                    try:
-                        import asyncio
-                        await asyncio.sleep(0.5)  # Небольшая задержка
-                        
-                        # Получаем последние сообщения в канале
-                        updates = await bot.get_updates(limit=10)
-                        for update in updates:
-                            if (update.message and 
-                                update.message.chat.id == target_channel_id and
-                                update.message.pinned_message and
-                                update.message.pinned_message.message_id == sent_message.message_id):
-                                # Это системное сообщение о закреплении
-                                await bot.delete_message(
-                                    chat_id=target_channel_id,
-                                    message_id=update.message.message_id
-                                )
-                                logger.debug("🗑️ Удалено системное сообщение о закреплении автопоста")
-                                break
-                    except Exception as delete_error:
-                        logger.debug("Не удалось удалить системное сообщение о закреплении: {}", str(delete_error))
-                        
+                    logger.info("📌 Пост из шаблона '{}' закреплен через Bot API", template_info['name'])
                 except Exception as pin_error:
-                    logger.warning("⚠️ Не удалось закрепить пост из шаблона '{}': {}", 
-                                 template_info['name'], str(pin_error))
-            
-            # Обновляем статус поста
+                    logger.warning("⚠️ Не удалось закрепить пост: {}", str(pin_error))
+
+        # Проверяем успешность публикации
+        if not sent_message:
+            logger.error("Не удалось опубликовать пост из шаблона '{}'", template_info['name'])
             post_crud = get_post_crud()
-            await post_crud.update_post_status(post.id, PostStatus.POSTED)
-            await post_crud.update_post(post.id, posted_date=datetime.now())
-            
-            logger.info("Пост из шаблона '{}' успешно опубликован в канале {}", 
-                       template_info['name'], target_channel_id)
-            
-            # Отправляем уведомление владельцу
-            await notify_owner_about_auto_publication(template_info['name'], post)
-            
-            return True
-            
-        except Exception as e:
-            logger.error("Ошибка публикации поста из шаблона '{}' в Telegram: {}", 
-                        template_info['name'], str(e))
-            
-            # Помечаем пост как проблемный
-            post_crud = get_post_crud()
-            await post_crud.add_post_error(post.id, f"Ошибка автопубликации: {str(e)}")
-            
+            await post_crud.add_post_error(post.id, "Ошибка публикации: sent_message is None")
             return False
-        
+
+        # Обновляем статус поста в БД
+        post_crud = get_post_crud()
+        await post_crud.update_post_status(post.id, PostStatus.POSTED)
+        await post_crud.update_post(post.id, posted_date=datetime.now())
+
+        logger.info("✅ Пост из шаблона '{}' успешно опубликован в канале {}",
+                   template_info['name'], target_channel_id)
+
+        # Отправляем уведомление владельцу
+        await notify_owner_about_auto_publication(template_info['name'], post)
+
+        return True
+
     except Exception as e:
         logger.error("Ошибка автопубликации шаблона '{}': {}", template_info['name'], str(e))
         return False

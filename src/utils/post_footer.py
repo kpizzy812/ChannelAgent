@@ -180,3 +180,50 @@ def validate_footer_links() -> bool:
     except Exception as e:
         logger.error("Ошибка валидации ссылок футера: {}", str(e))
         return False
+
+
+def convert_markdown_to_html(text: str) -> str:
+    """
+    Конвертировать Markdown разметку в HTML для Bot API
+
+    Args:
+        text: Текст с Markdown разметкой
+
+    Returns:
+        Текст с HTML разметкой
+    """
+    import re
+
+    try:
+        result = text
+
+        # Конвертируем жирный текст: **text** -> <b>text</b>
+        result = re.sub(r'\*\*([^*]+)\*\*', r'<b>\1</b>', result)
+
+        # Конвертируем курсив: *text* или _text_ -> <i>text</i>
+        # Но не путаем с __underline__
+        result = re.sub(r'(?<![_*])\*([^*]+)\*(?![_*])', r'<i>\1</i>', result)
+
+        # Конвертируем подчёркивание: __text__ -> <u>text</u>
+        result = re.sub(r'__([^_]+)__', r'<u>\1</u>', result)
+
+        # Конвертируем ссылки: [text](url) -> <a href="url">text</a>
+        # Но не трогаем emoji/ и spoiler
+        result = re.sub(
+            r'\[([^\]]+)\]\((?!emoji/|spoiler)(https?://[^\)]+)\)',
+            r'<a href="\2">\1</a>',
+            result
+        )
+
+        # Конвертируем код: `text` -> <code>text</code>
+        result = re.sub(r'`([^`]+)`', r'<code>\1</code>', result)
+
+        # Конвертируем спойлеры: ||text|| -> <tg-spoiler>text</tg-spoiler>
+        result = re.sub(r'\|\|([^|]+)\|\|', r'<tg-spoiler>\1</tg-spoiler>', result)
+
+        logger.debug("Конвертирован Markdown -> HTML: {} символов", len(result))
+        return result
+
+    except Exception as e:
+        logger.error("Ошибка конвертации Markdown -> HTML: {}", str(e))
+        return text

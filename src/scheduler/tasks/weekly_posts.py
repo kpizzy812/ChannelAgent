@@ -330,6 +330,8 @@ async def publish_weekly_post(post, content: str) -> bool:
             if current_post:
                 current_post.status = PostStatus.POSTED
                 current_post.posted_date = datetime.now()
+                # Сохраняем ID опубликованного сообщения для гиперссылок
+                current_post.published_message_id = sent_message.message_id
                 await post_crud.update(current_post)
 
             # Проверяем настройку закрепления

@@ -50,12 +50,13 @@ class PostCRUD:
                 
                 # Вставляем пост
                 cursor = await conn.execute(
-                    """INSERT INTO posts 
+                    """INSERT INTO posts
                        (channel_id, message_id, original_text, processed_text,
                         photo_file_id, photo_path, relevance_score, sentiment, status,
                         source_link, posted_date, scheduled_date, moderation_notes,
-                        ai_analysis, error_message, created_at, updated_at, created_date)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        ai_analysis, error_message, created_at, updated_at, created_date,
+                        published_message_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         post.channel_id,
                         post.message_id,
@@ -74,7 +75,8 @@ class PostCRUD:
                         post.error_message,
                         post.created_at.isoformat(),
                         post.updated_at.isoformat() if post.updated_at else None,
-                        post.created_date.isoformat() if post.created_date else post.created_at.isoformat()
+                        post.created_date.isoformat() if post.created_date else post.created_at.isoformat(),
+                        post.published_message_id
                     )
                 )
                 
@@ -110,7 +112,9 @@ class PostCRUD:
                               photo_file_id, relevance_score, sentiment, status,
                               source_link, posted_date, scheduled_date, moderation_notes,
                               ai_analysis, error_message, pin_post, created_at, updated_at,
-                              created_date, photo_path
+                              created_date, photo_path, video_file_id, video_path, media_type,
+                              video_duration, video_width, video_height, extracted_links, media_items,
+                              retry_count, published_message_id
                        FROM posts WHERE id = ?""",
                     (post_id,)
                 )
@@ -144,7 +148,9 @@ class PostCRUD:
                               photo_file_id, relevance_score, sentiment, status,
                               source_link, posted_date, scheduled_date, moderation_notes,
                               ai_analysis, error_message, pin_post, created_at, updated_at,
-                              created_date, photo_path
+                              created_date, photo_path, video_file_id, video_path, media_type,
+                              video_duration, video_width, video_height, extracted_links, media_items,
+                              retry_count, published_message_id
                        FROM posts WHERE channel_id = ? AND message_id = ?""",
                     (channel_id, message_id)
                 )
@@ -177,8 +183,10 @@ class PostCRUD:
                     """SELECT id, channel_id, message_id, original_text, processed_text,
                               photo_file_id, relevance_score, sentiment, status,
                               source_link, posted_date, scheduled_date, moderation_notes,
-                              ai_analysis, error_message, pin_post, created_at, updated_at, 
-                              created_date, photo_path
+                              ai_analysis, error_message, pin_post, created_at, updated_at,
+                              created_date, photo_path, video_file_id, video_path, media_type,
+                              video_duration, video_width, video_height, extracted_links, media_items,
+                              retry_count, published_message_id
                        FROM posts WHERE status = ?
                        ORDER BY created_at DESC
                        LIMIT ?""",
@@ -220,8 +228,10 @@ class PostCRUD:
                               photo_file_id, relevance_score, sentiment, status,
                               source_link, posted_date, scheduled_date, moderation_notes,
                               ai_analysis, error_message, pin_post, created_at, updated_at,
-                              created_date, photo_path
-                       FROM posts 
+                              created_date, photo_path, video_file_id, video_path, media_type,
+                              video_duration, video_width, video_height, extracted_links, media_items,
+                              retry_count, published_message_id
+                       FROM posts
                        WHERE status = ? AND scheduled_date <= datetime('now')
                        ORDER BY scheduled_date ASC""",
                     (PostStatus.SCHEDULED.value,)
@@ -796,7 +806,8 @@ class PostCRUD:
         # 14:error_message, 15:pin_post, 16:created_at, 17:updated_at, 18:created_date,
         # 19:photo_path (v3), 20:video_file_id (v4), 21:video_path (v4), 22:media_type (v4),
         # 23:video_duration (v4), 24:video_width (v4), 25:video_height (v4),
-        # 26:extracted_links (v6), 27:media_items (v7)
+        # 26:extracted_links (v6), 27:media_items (v7), 28:retry_count (v8),
+        # 29:published_message_id (v9)
 
         return Post(
             id=row[0],
@@ -826,8 +837,71 @@ class PostCRUD:
             updated_at=datetime.fromisoformat(row[17]) if row[17] else None,
             created_date=datetime.fromisoformat(row[18]) if row[18] else datetime.now(),
             extracted_links=row[26] if len(row) > 26 else None,
-            media_items=row[27] if len(row) > 27 else None
+            media_items=row[27] if len(row) > 27 else None,
+            retry_count=row[28] if len(row) > 28 else 0,
+            published_message_id=row[29] if len(row) > 29 else None
         )
+
+    @staticmethod
+    async def get_published_posts_by_date(
+        date: datetime,
+        exclude_types: Optional[List[str]] = None
+    ) -> List[Post]:
+        """
+        Получить опубликованные посты за день с фильтрацией по типам
+
+        Args:
+            date: Дата для фильтрации (берется только дата, время игнорируется)
+            exclude_types: Список типов постов для исключения (маркеры из ai_analysis)
+                          Например: ["daily_post", "weekly_analytics", "summary_post"]
+
+        Returns:
+            Список опубликованных постов за день с published_message_id
+        """
+        try:
+            async with get_db_connection() as conn:
+                # Формируем базовый запрос
+                query = """SELECT id, channel_id, message_id, original_text, processed_text,
+                                  photo_file_id, relevance_score, sentiment, status,
+                                  source_link, posted_date, scheduled_date, moderation_notes,
+                                  ai_analysis, error_message, pin_post, created_at, updated_at,
+                                  created_date, photo_path, video_file_id, video_path, media_type,
+                                  video_duration, video_width, video_height, extracted_links, media_items,
+                                  retry_count, published_message_id
+                           FROM posts
+                           WHERE DATE(posted_date) = DATE(?)
+                           AND status = ?
+                           AND published_message_id IS NOT NULL"""
+
+                params = [date.isoformat(), PostStatus.POSTED.value]
+
+                # Добавляем фильтрацию по типам если указаны
+                if exclude_types:
+                    # Добавляем условия для исключения каждого типа
+                    for exclude_type in exclude_types:
+                        query += " AND (ai_analysis NOT LIKE ? OR ai_analysis IS NULL)"
+                        params.append(f"%{exclude_type}%")
+
+                query += " ORDER BY posted_date DESC"
+
+                cursor = await conn.execute(query, tuple(params))
+                rows = await cursor.fetchall()
+
+                posts = [PostCRUD._row_to_post(row) for row in rows]
+
+                logger.debug(
+                    "Найдено {} опубликованных постов за {} (исключены типы: {})",
+                    len(posts), date.date(), exclude_types or "нет"
+                )
+
+                return posts
+
+        except Exception as e:
+            logger.error(
+                "Ошибка получения опубликованных постов за {}: {}",
+                date.date(), str(e)
+            )
+            raise DatabaseError(f"Не удалось получить опубликованные посты: {str(e)}")
 
 
 # Глобальный экземпляр CRUD

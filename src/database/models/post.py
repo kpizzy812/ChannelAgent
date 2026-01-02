@@ -98,6 +98,9 @@ class Post(BaseModel):
     # Счётчик попыток публикации для retry механизма
     retry_count: int = 0
 
+    # ID опубликованного поста в целевом канале (для гиперссылок)
+    published_message_id: Optional[int] = None
+
     # Для совместимости со схемой БД
     created_date: Optional[datetime] = None
     
@@ -223,6 +226,23 @@ class Post(BaseModel):
     def album_count(self) -> int:
         """Количество медиа в альбоме"""
         return len(self.get_media_items())
+
+    @property
+    def published_link(self) -> Optional[str]:
+        """Ссылка на опубликованный пост в целевом канале"""
+        if not self.published_message_id:
+            return None
+
+        # Импортируем здесь чтобы избежать циклических импортов
+        try:
+            from src.utils.config import get_config
+            config = get_config()
+            # Получаем чистый ID канала (убираем -100 префикс)
+            clean_channel_id = str(abs(config.TARGET_CHANNEL_ID))[3:]
+            return f"https://t.me/c/{clean_channel_id}/{self.published_message_id}"
+        except Exception as e:
+            logger.error("Ошибка генерации published_link: {}", str(e))
+            return None
 
     def get_media_items(self) -> List[dict]:
         """

@@ -162,7 +162,7 @@ async def publish_scheduled_post(post, use_premium_emoji: bool = True) -> bool:
                         # Обновляем статус поста
                         post_crud = get_post_crud()
                         await post_crud.update_post_status(post.id, PostStatus.POSTED)
-                        await post_crud.update_post(post.id, posted_date=datetime.now())
+                        await post_crud.update_post(post.id, posted_date=datetime.now(), published_message_id=message_id)
 
                         logger.info("Отложенный пост {} опубликован через UserBot, message_id: {}",
                                    post.id, message_id)
@@ -257,7 +257,7 @@ async def publish_scheduled_post(post, use_premium_emoji: bool = True) -> bool:
             # Обновляем статус поста
             post_crud = get_post_crud()
             await post_crud.update_post_status(post.id, PostStatus.POSTED)
-            await post_crud.update_post(post.id, posted_date=datetime.now())
+            await post_crud.update_post(post.id, posted_date=datetime.now(), published_message_id=sent_message.message_id)
 
             logger.info("Пост {} успешно опубликован в канале {}",
                        post.id, target_channel_id)

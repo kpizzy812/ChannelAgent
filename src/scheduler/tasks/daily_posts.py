@@ -394,7 +394,7 @@ async def save_daily_post(content: str, auto_publish: bool = True, photo_file_id
 
 async def publish_daily_post_to_channel(post, content: str) -> bool:
     """
-    Опубликовать ежедневный пост в целевой канал
+    Опубликовать ежедневный пост в целевой канал через UserBot с Premium Emoji
     При ошибке планирует повторную попытку через RETRY_DELAY_MINUTES минут
 
     Args:
@@ -408,31 +408,87 @@ async def publish_daily_post_to_channel(post, content: str) -> bool:
         logger.info("📤 Публикация ежедневного поста в канал")
 
         config = get_config()
+        sent_message = None
 
-        # Получаем экземпляр бота
-        bot = get_bot_instance()
+        # Пробуем опубликовать через UserBot с Premium Emoji
+        try:
+            from src.userbot.publisher import get_userbot_publisher
 
-        # Добавляем футер с полезными ссылками (Markdown режим)
-        content = add_footer_to_post(content, parse_mode="Markdown")
+            publisher = await get_userbot_publisher()
 
-        # Проверяем есть ли фото у поста
-        if post.photo_file_id:
-            logger.info("📷 Публикация поста с фото: {}", post.photo_file_id)
-            # Публикуем пост с фото
-            sent_message = await bot.send_photo(
-                chat_id=config.TARGET_CHANNEL_ID,
-                photo=post.photo_file_id,
-                caption=content,
-                parse_mode="Markdown"
-            )
-        else:
-            logger.info("📝 Публикация текстового поста")
-            # Публикуем обычный текстовый пост
-            sent_message = await bot.send_message(
-                chat_id=config.TARGET_CHANNEL_ID,
-                text=content,
-                parse_mode="Markdown"  # Используем Markdown для корректного отображения
-            )
+            if publisher and publisher.is_available:
+                logger.info("Публикуем ежедневный пост через UserBot с Premium Emoji")
+
+                # Получаем путь к фото если есть
+                photo_path = None
+                if post.photo_file_id:
+                    # Для daily posts фото хранится как file_id, пробуем скачать
+                    try:
+                        from src.bot.media_handler import get_media_handler
+                        media_handler = get_media_handler()
+                        photo_path = await media_handler.download_photo_by_file_id(post.photo_file_id)
+                        if photo_path:
+                            logger.info("Фото скачано для UserBot публикации: {}", photo_path)
+                    except Exception as download_error:
+                        logger.warning("Не удалось скачать фото: {}", str(download_error))
+
+                # Публикуем через UserBot (футер добавляется внутри publisher.publish_post)
+                message_id = await publisher.publish_post(
+                    channel_id=config.TARGET_CHANNEL_ID,
+                    text=content,
+                    photo_path=photo_path,
+                    pin_post=False,  # Закрепление обработаем отдельно
+                    add_footer=True
+                )
+
+                if message_id:
+                    logger.info("✅ Ежедневный пост опубликован через UserBot, message_id: {}", message_id)
+                    # Создаём фейковый объект для совместимости с дальнейшим кодом
+                    class FakeMessage:
+                        def __init__(self, msg_id):
+                            self.message_id = msg_id
+                    sent_message = FakeMessage(message_id)
+                else:
+                    logger.warning("Не удалось опубликовать через UserBot, fallback на Bot API")
+            else:
+                logger.debug("UserbotPublisher недоступен, используем Bot API")
+
+        except Exception as userbot_error:
+            logger.warning("Ошибка публикации через UserBot: {}, fallback на Bot API",
+                          str(userbot_error))
+
+        # Fallback: публикация через Bot API (без Premium Emoji)
+        if not sent_message:
+            logger.info("Публикуем ежедневный пост через Bot API (без Premium Emoji)")
+
+            # Получаем экземпляр бота
+            bot = get_bot_instance()
+
+            # Конвертируем Markdown -> HTML для Bot API
+            from src.utils.post_footer import convert_markdown_to_html
+            content_html = convert_markdown_to_html(content)
+
+            # Добавляем футер с полезными ссылками (HTML режим для Bot API)
+            content_with_footer = add_footer_to_post(content_html, parse_mode="HTML")
+
+            # Проверяем есть ли фото у поста
+            if post.photo_file_id:
+                logger.info("📷 Публикация поста с фото: {}", post.photo_file_id)
+                # Публикуем пост с фото
+                sent_message = await bot.send_photo(
+                    chat_id=config.TARGET_CHANNEL_ID,
+                    photo=post.photo_file_id,
+                    caption=content_with_footer,
+                    parse_mode="HTML"
+                )
+            else:
+                logger.info("📝 Публикация текстового поста")
+                # Публикуем обычный текстовый пост
+                sent_message = await bot.send_message(
+                    chat_id=config.TARGET_CHANNEL_ID,
+                    text=content_with_footer,
+                    parse_mode="HTML"
+                )
 
         if sent_message:
             # Обновляем пост в БД - отмечаем как опубликованный
@@ -446,6 +502,8 @@ async def publish_daily_post_to_channel(post, content: str) -> bool:
                 current_post.posted_date = datetime.now()
                 if hasattr(current_post, 'retry_count'):
                     current_post.retry_count = 0
+                # Сохраняем ID опубликованного сообщения для гиперссылок
+                current_post.published_message_id = sent_message.message_id
                 await post_crud.update(current_post)
 
             # Проверяем настройку закрепления постов

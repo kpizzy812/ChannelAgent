@@ -199,7 +199,24 @@ class AIPostProcessor:
         except Exception as e:
             logger.error("Ошибка извлечения медиа информации: {}", str(e))
             return None
-    
+
+    def _clean_prompt_artifacts(self, text: str) -> str:
+        """Очистить артефакты от промпта (---, <<<, >>>, лишние переносы)"""
+        import re
+
+        # Удаляем --- в начале и конце
+        text = re.sub(r'^---\s*\n*', '', text)
+        text = re.sub(r'\n*---\s*$', '', text)
+
+        # Удаляем <<< и >>> (новые разделители)
+        text = re.sub(r'^<<<\s*\n*', '', text)
+        text = re.sub(r'\n*>>>\s*$', '', text)
+
+        # Убираем лишние переносы строк
+        text = text.strip()
+
+        return text
+
     async def _get_source_channel_info(self, channel_id: int) -> Optional[Dict[str, Any]]:
         """Получить информацию о канале-источнике для удаления брендинга"""
         try:
@@ -506,6 +523,10 @@ class AIPostProcessor:
                 }
             
             formatted_text = formatting_result.get("formatted_text", "")
+
+            # Очистка артефактов от промпта (--- в начале/конце)
+            formatted_text = self._clean_prompt_artifacts(formatted_text)
+
             logger.info("✅ ЭТАП 2 завершен: {} символов Markdown", len(formatted_text))
 
             # ЭТАП 3-4: Анализ источника и интеграция ссылки
@@ -518,6 +539,7 @@ class AIPostProcessor:
             if post.extracted_links:
                 try:
                     import json
+                    from urllib.parse import urlparse
                     from src.ai.source_analyzer import get_source_analyzer
                     from src.ai.source_integrator import get_source_integrator
 
@@ -537,6 +559,20 @@ class AIPostProcessor:
                         first_verb,
                         source_confidence
                     )
+
+                    # Дополнительная валидация URL - отклоняем главные страницы
+                    if source_url:
+                        parsed_url = urlparse(source_url)
+                        path = parsed_url.path.strip('/')
+
+                        # Отклоняем если это главная страница (пустой path или только язык)
+                        if not path or len(path) < 5:
+                            logger.info(
+                                "⚠️ Отклонена ссылка на главную страницу: {}",
+                                source_url[:50]
+                            )
+                            source_url = None
+                            source_confidence = 0.0
 
                     # Проверяем порог уверенности
                     if source_confidence < 0.7:
