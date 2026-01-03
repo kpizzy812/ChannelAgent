@@ -22,6 +22,16 @@ from src.utils.post_footer import add_footer_to_post
 logger = logger.bind(module="scheduler_delayed_posts")
 
 
+def get_naive_datetime(dt: Optional[datetime]) -> Optional[datetime]:
+    """
+    Убрать timezone info из datetime для корректного сравнения
+    с datetime.now() который timezone-naive
+    """
+    if dt and hasattr(dt, 'tzinfo') and dt.tzinfo is not None:
+        return dt.replace(tzinfo=None)
+    return dt
+
+
 async def process_scheduled_posts() -> None:
     """
     Обработка отложенных постов
@@ -80,20 +90,21 @@ async def get_posts_ready_for_publishing() -> List[Any]:
     """
     try:
         post_crud = get_post_crud()
-        
+
         # Получаем все запланированные посты
         scheduled_posts = await post_crud.get_posts_by_status(PostStatus.SCHEDULED)
-        
+
         # Фильтруем по времени
         ready_posts = []
         current_time = datetime.now()
-        
+
         for post in scheduled_posts:
-            if post.scheduled_date and post.scheduled_date <= current_time:
+            scheduled = get_naive_datetime(post.scheduled_date)
+            if scheduled and scheduled <= current_time:
                 ready_posts.append(post)
-                logger.debug("Пост {} готов к публикации (запланирован на {})", 
+                logger.debug("Пост {} готов к публикации (запланирован на {})",
                            post.id, post.scheduled_date.strftime("%H:%M %d.%m.%Y"))
-        
+
         return ready_posts
         
     except Exception as e:
@@ -433,13 +444,13 @@ async def get_scheduled_posts_summary() -> Dict[str, Any]:
         
         current_time = datetime.now()
         tomorrow = current_time + timedelta(days=1)
-        
+
         # Считаем посты
-        ready_now = len([p for p in scheduled_posts if p.scheduled_date and p.scheduled_date <= current_time])
-        next_24h = len([p for p in scheduled_posts if p.scheduled_date and p.scheduled_date <= tomorrow])
-        
+        ready_now = len([p for p in scheduled_posts if get_naive_datetime(p.scheduled_date) and get_naive_datetime(p.scheduled_date) <= current_time])
+        next_24h = len([p for p in scheduled_posts if get_naive_datetime(p.scheduled_date) and get_naive_datetime(p.scheduled_date) <= tomorrow])
+
         # Находим ближайший пост
-        future_posts = [p for p in scheduled_posts if p.scheduled_date and p.scheduled_date > current_time]
+        future_posts = [p for p in scheduled_posts if get_naive_datetime(p.scheduled_date) and get_naive_datetime(p.scheduled_date) > current_time]
         next_post_time = None
         
         if future_posts:
