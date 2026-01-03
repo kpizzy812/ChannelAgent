@@ -845,22 +845,30 @@ class PostCRUD:
     @staticmethod
     async def get_published_posts_by_date(
         date: datetime,
-        exclude_types: Optional[List[str]] = None
+        exclude_types: Optional[List[str]] = None,
+        hours: int = 24
     ) -> List[Post]:
         """
-        Получить опубликованные посты за день с фильтрацией по типам
+        Получить опубликованные посты за последние N часов с фильтрацией по типам
 
         Args:
-            date: Дата для фильтрации (берется только дата, время игнорируется)
+            date: Конечная дата/время (обычно datetime.now())
             exclude_types: Список типов постов для исключения (маркеры из ai_analysis)
                           Например: ["daily_post", "weekly_analytics", "summary_post"]
+            hours: Количество часов для выборки (по умолчанию 24)
 
         Returns:
-            Список опубликованных постов за день с published_message_id
+            Список опубликованных постов за период с published_message_id
+            Отсортированы от старых к новым (ASC) для правильного порядка в summary
         """
         try:
+            from datetime import timedelta
+
+            # Вычисляем начало периода (24 часа назад от указанной даты)
+            start_time = date - timedelta(hours=hours)
+
             async with get_db_connection() as conn:
-                # Формируем базовый запрос
+                # Формируем базовый запрос - выборка за последние N часов
                 query = """SELECT id, channel_id, message_id, original_text, processed_text,
                                   photo_file_id, relevance_score, sentiment, status,
                                   source_link, posted_date, scheduled_date, moderation_notes,
@@ -869,11 +877,12 @@ class PostCRUD:
                                   video_duration, video_width, video_height, extracted_links, media_items,
                                   retry_count, published_message_id
                            FROM posts
-                           WHERE DATE(posted_date) = DATE(?)
+                           WHERE posted_date >= ?
+                           AND posted_date <= ?
                            AND status = ?
                            AND published_message_id IS NOT NULL"""
 
-                params = [date.isoformat(), PostStatus.POSTED.value]
+                params = [start_time.isoformat(), date.isoformat(), PostStatus.POSTED.value]
 
                 # Добавляем фильтрацию по типам если указаны
                 if exclude_types:
@@ -882,7 +891,8 @@ class PostCRUD:
                         query += " AND (ai_analysis NOT LIKE ? OR ai_analysis IS NULL)"
                         params.append(f"%{exclude_type}%")
 
-                query += " ORDER BY posted_date DESC"
+                # Сортировка от старых к новым (для summary новые будут внизу, потом реверс)
+                query += " ORDER BY posted_date ASC"
 
                 cursor = await conn.execute(query, tuple(params))
                 rows = await cursor.fetchall()
@@ -890,16 +900,17 @@ class PostCRUD:
                 posts = [PostCRUD._row_to_post(row) for row in rows]
 
                 logger.debug(
-                    "Найдено {} опубликованных постов за {} (исключены типы: {})",
-                    len(posts), date.date(), exclude_types or "нет"
+                    "Найдено {} опубликованных постов за последние {} часов ({} - {}) (исключены типы: {})",
+                    len(posts), hours, start_time.strftime("%H:%M"), date.strftime("%H:%M"),
+                    exclude_types or "нет"
                 )
 
                 return posts
 
         except Exception as e:
             logger.error(
-                "Ошибка получения опубликованных постов за {}: {}",
-                date.date(), str(e)
+                "Ошибка получения опубликованных постов за последние {} часов: {}",
+                hours, str(e)
             )
             raise DatabaseError(f"Не удалось получить опубликованные посты: {str(e)}")
 

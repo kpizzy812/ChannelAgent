@@ -46,6 +46,7 @@ def get_emoji_menu_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📋 Список эмодзи", callback_data="emoji_list")],
         [InlineKeyboardButton(text="➕ Добавить эмодзи", callback_data="emoji_add")],
+        [InlineKeyboardButton(text="🗑 Удалить связь", callback_data="emoji_delete_mode")],
         [InlineKeyboardButton(text="🧪 Тест публикации", callback_data="emoji_test")],
         [InlineKeyboardButton(text="🔄 Обновить кеш", callback_data="emoji_refresh")],
         [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
@@ -110,6 +111,40 @@ def get_category_keyboard():
     buttons = [[InlineKeyboardButton(text=name, callback_data=f"emoji_cat_{cat}")]
                for name, cat in categories]
     buttons.append([InlineKeyboardButton(text="❌ Отмена", callback_data="emoji_menu")])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def get_emoji_delete_keyboard(emojis: list, page: int = 0, per_page: int = 10):
+    """Клавиатура для удаления эмодзи"""
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+    buttons = []
+
+    # Эмодзи на текущей странице
+    start = page * per_page
+    end = start + per_page
+    page_emojis = emojis[start:end]
+
+    for emoji in page_emojis:
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"🗑 {emoji.standard_emoji} → {emoji.alt_text}",
+                callback_data=f"emoji_confirm_delete_{emoji.id}"
+            )
+        ])
+
+    # Навигация
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton(text="⬅️", callback_data=f"emoji_delpage_{page-1}"))
+    if end < len(emojis):
+        nav_buttons.append(InlineKeyboardButton(text="➡️", callback_data=f"emoji_delpage_{page+1}"))
+
+    if nav_buttons:
+        buttons.append(nav_buttons)
+
+    buttons.append([InlineKeyboardButton(text="🔙 Назад в меню", callback_data="emoji_menu")])
 
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -558,6 +593,115 @@ async def refresh_emoji_cache(callback: CallbackQuery):
         await callback.answer("Ошибка обновления", show_alert=True)
 
 
+@emoji_router.callback_query(F.data == "emoji_delete_mode", OwnerFilter())
+async def show_delete_mode(callback: CallbackQuery):
+    """Показать режим удаления эмодзи"""
+    try:
+        crud = get_emoji_crud()
+        emojis = await crud.get_all(active_only=True)
+
+        if not emojis:
+            await callback.message.edit_text(
+                "🗑 <b>Удаление связей</b>\n\n"
+                "<i>Словарь пуст. Нечего удалять.</i>",
+                reply_markup=get_emoji_menu_keyboard(),
+                parse_mode="HTML"
+            )
+        else:
+            text = (
+                f"🗑 <b>Удаление связей эмодзи</b>\n\n"
+                f"Всего связей: {len(emojis)}\n\n"
+                f"<i>Выберите связь для удаления:</i>"
+            )
+            await callback.message.edit_text(
+                text,
+                reply_markup=get_emoji_delete_keyboard(emojis),
+                parse_mode="HTML"
+            )
+
+        await callback.answer()
+
+    except Exception as e:
+        logger.error("Ошибка режима удаления: {}", str(e))
+        await callback.answer("Ошибка", show_alert=True)
+
+
+@emoji_router.callback_query(F.data.startswith("emoji_delpage_"), OwnerFilter())
+async def delete_mode_pagination(callback: CallbackQuery):
+    """Пагинация режима удаления"""
+    try:
+        page = int(callback.data.split("_")[2])
+        crud = get_emoji_crud()
+        emojis = await crud.get_all(active_only=True)
+
+        text = (
+            f"🗑 <b>Удаление связей эмодзи</b>\n\n"
+            f"Всего связей: {len(emojis)}\n\n"
+            f"<i>Выберите связь для удаления:</i>"
+        )
+        await callback.message.edit_text(
+            text,
+            reply_markup=get_emoji_delete_keyboard(emojis, page),
+            parse_mode="HTML"
+        )
+        await callback.answer()
+
+    except Exception as e:
+        logger.error("Ошибка пагинации удаления: {}", str(e))
+        await callback.answer("Ошибка", show_alert=True)
+
+
+@emoji_router.callback_query(F.data.startswith("emoji_confirm_delete_"), OwnerFilter())
+async def confirm_delete_emoji(callback: CallbackQuery):
+    """Подтвердить удаление эмодзи"""
+    try:
+        emoji_id = int(callback.data.split("_")[3])
+        crud = get_emoji_crud()
+        emoji = await crud.get_by_id(emoji_id)
+
+        if not emoji:
+            await callback.answer("Эмодзи не найден", show_alert=True)
+            return
+
+        # Удаляем
+        success = await crud.delete(emoji_id)
+
+        if success:
+            await reload_emoji_dictionary()
+            await callback.answer(
+                f"✅ Связь удалена: {emoji.standard_emoji} → {emoji.alt_text}",
+                show_alert=True
+            )
+            logger.info("Удалена связь эмодзи: {} -> {}", emoji.standard_emoji, emoji.document_id)
+
+            # Обновляем список
+            emojis = await crud.get_all(active_only=True)
+            if not emojis:
+                await callback.message.edit_text(
+                    "🗑 <b>Удаление связей</b>\n\n"
+                    "<i>Все связи удалены.</i>",
+                    reply_markup=get_emoji_menu_keyboard(),
+                    parse_mode="HTML"
+                )
+            else:
+                text = (
+                    f"🗑 <b>Удаление связей эмодзи</b>\n\n"
+                    f"Всего связей: {len(emojis)}\n\n"
+                    f"<i>Выберите связь для удаления:</i>"
+                )
+                await callback.message.edit_text(
+                    text,
+                    reply_markup=get_emoji_delete_keyboard(emojis),
+                    parse_mode="HTML"
+                )
+        else:
+            await callback.answer("Не удалось удалить", show_alert=True)
+
+    except Exception as e:
+        logger.error("Ошибка удаления связи: {}", str(e))
+        await callback.answer("Ошибка", show_alert=True)
+
+
 @emoji_router.callback_query(F.data == "emoji_test", OwnerFilter())
 async def test_emoji_publish(callback: CallbackQuery):
     """Тестовая публикация с Premium Emoji - отправляет все эмодзи из словаря"""
@@ -586,7 +730,8 @@ async def test_emoji_publish(callback: CallbackQuery):
         # Формируем тестовое сообщение со ВСЕМИ эмодзи
         emoji_lines = []
         for standard, (doc_id, alt_text) in all_emojis.items():
-            emoji_lines.append(f"{standard} → Premium")
+            # Показываем премиум → стандартный (в моноширинном шрифте чтоб не заменился)
+            emoji_lines.append(f"{alt_text} → `{standard}`")
 
         test_text = (
             "🧪 **ТЕСТ PREMIUM EMOJI**\n\n"
