@@ -14,6 +14,7 @@ from loguru import logger
 from src.database.crud.post import get_post_crud
 from src.database.models.post import PostStatus, PostSentiment, create_post
 from src.ai.summary_generator import get_summary_generator
+from src.scheduler.tasks.manual_posts import sync_manual_posts
 from src.utils.config import get_config
 from src.utils.exceptions import TaskExecutionError
 
@@ -39,6 +40,15 @@ async def create_daily_summary_post() -> Optional[int]:
         if await check_summary_exists_today():
             logger.info("Summary пост уже создан сегодня")
             return None
+
+        # Синхронизируем ручные посты из целевого канала перед сборкой summary
+        try:
+            await sync_manual_posts()
+        except Exception as sync_error:
+            logger.warning(
+                "⚠️ Синхронизация ручных постов не удалась, продолжаем без них: {}",
+                str(sync_error)
+            )
 
         # Получаем посты за сегодня (опубликованные с published_message_id)
         today = datetime.now()

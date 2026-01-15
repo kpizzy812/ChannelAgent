@@ -914,6 +914,71 @@ class PostCRUD:
             )
             raise DatabaseError(f"Не удалось получить опубликованные посты: {str(e)}")
 
+    @staticmethod
+    async def get_published_message_ids_by_date(
+        date: datetime,
+        hours: int = 24,
+        include_types: Optional[List[str]] = None,
+        exclude_types: Optional[List[str]] = None
+    ) -> List[int]:
+        """
+        Получить published_message_id опубликованных постов за последние N часов
+
+        Args:
+            date: Конечная дата/время (обычно datetime.now())
+            hours: Количество часов для выборки (по умолчанию 24)
+            include_types: Список типов, которые нужно включить (по ai_analysis LIKE)
+            exclude_types: Список типов, которые нужно исключить (по ai_analysis LIKE)
+
+        Returns:
+            Список published_message_id за период
+        """
+        try:
+            from datetime import timedelta
+
+            start_time = date - timedelta(hours=hours)
+
+            async with get_db_connection() as conn:
+                query = """SELECT published_message_id
+                           FROM posts
+                           WHERE posted_date >= ?
+                           AND posted_date <= ?
+                           AND status = ?
+                           AND published_message_id IS NOT NULL"""
+
+                params = [start_time.isoformat(), date.isoformat(), PostStatus.POSTED.value]
+
+                if include_types:
+                    include_clauses = []
+                    for include_type in include_types:
+                        include_clauses.append("ai_analysis LIKE ?")
+                        params.append(f"%{include_type}%")
+                    query += " AND (" + " OR ".join(include_clauses) + ")"
+
+                if exclude_types:
+                    for exclude_type in exclude_types:
+                        query += " AND (ai_analysis NOT LIKE ? OR ai_analysis IS NULL)"
+                        params.append(f"%{exclude_type}%")
+
+                cursor = await conn.execute(query, tuple(params))
+                rows = await cursor.fetchall()
+
+                message_ids = [row[0] for row in rows if row[0] is not None]
+
+                logger.debug(
+                    "Найдено {} published_message_id за последние {} часов ({} - {})",
+                    len(message_ids), hours, start_time.strftime("%H:%M"), date.strftime("%H:%M")
+                )
+
+                return message_ids
+
+        except Exception as e:
+            logger.error(
+                "Ошибка получения published_message_id за последние {} часов: {}",
+                hours, str(e)
+            )
+            raise DatabaseError(f"Не удалось получить published_message_id: {str(e)}")
+
 
 # Глобальный экземпляр CRUD
 def get_post_crud() -> PostCRUD:
