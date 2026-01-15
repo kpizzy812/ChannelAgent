@@ -554,9 +554,12 @@ async def process_category_selection(callback: CallbackQuery, state: FSMContext)
         await callback.answer("Ошибка сохранения", show_alert=True)
 
 
-@emoji_router.callback_query(F.data.startswith("emoji_delete_"), OwnerFilter())
+@emoji_router.callback_query(
+    F.data.startswith("emoji_delete_") & ~F.data.in_({"emoji_delete_mode"}),
+    OwnerFilter()
+)
 async def delete_emoji(callback: CallbackQuery):
-    """Удалить эмодзи"""
+    """Удалить эмодзи по ID (исключая emoji_delete_mode)"""
     try:
         emoji_id = int(callback.data.split("_")[2])
         crud = get_emoji_crud()

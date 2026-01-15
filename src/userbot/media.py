@@ -76,16 +76,18 @@ class TelethonMediaProcessor:
         self,
         message_media: MessageMediaPhoto,
         post_id: int,
-        max_retries: int = 3
+        max_retries: int = 3,
+        file_suffix: str = ""
     ) -> Optional[Dict[str, Any]]:
         """
         Загрузить фото из сообщения
-        
+
         Args:
             message_media: Медиа объект сообщения
             post_id: ID поста для именования файлов
             max_retries: Количество повторных попыток
-            
+            file_suffix: Суффикс для имени файла (для медиа-групп)
+
         Returns:
             Словарь с информацией о загруженном фото или None
         """
@@ -109,9 +111,9 @@ class TelethonMediaProcessor:
                     logger.error("Не найден подходящий размер фото")
                     return None
                 
-                # Создаем имена файлов
-                photo_filename = f"photo_{post_id}_{photo.id}.jpg"
-                thumbnail_filename = f"thumb_{post_id}_{photo.id}.jpg"
+                # Создаем имена файлов (с учётом суффикса для медиа-групп)
+                photo_filename = f"photo_{post_id}_{photo.id}{file_suffix}.jpg"
+                thumbnail_filename = f"thumb_{post_id}_{photo.id}{file_suffix}.jpg"
                 
                 photo_path = self.photos_dir / photo_filename
                 thumbnail_path = self.thumbnails_dir / thumbnail_filename
@@ -179,16 +181,18 @@ class TelethonMediaProcessor:
         self,
         message_media: MessageMediaDocument,
         post_id: int,
-        max_retries: int = 3
+        max_retries: int = 3,
+        file_suffix: str = ""
     ) -> Optional[Dict[str, Any]]:
         """
         Загрузить видео из сообщения
-        
+
         Args:
             message_media: Медиа объект сообщения
             post_id: ID поста для именования файлов
             max_retries: Количество повторных попыток
-            
+            file_suffix: Суффикс для имени файла (для медиа-групп)
+
         Returns:
             Словарь с информацией о загруженном видео или None
         """
@@ -236,9 +240,9 @@ class TelethonMediaProcessor:
                     }
                     file_ext = mime_to_ext.get(document.mime_type, '.mp4')
                 
-                # Создаем имена файлов
-                video_filename = f"video_{post_id}_{document.id}{file_ext}"
-                thumbnail_filename = f"thumb_{post_id}_{document.id}.jpg"
+                # Создаем имена файлов (с учётом суффикса для медиа-групп)
+                video_filename = f"video_{post_id}_{document.id}{file_suffix}{file_ext}"
+                thumbnail_filename = f"thumb_{post_id}_{document.id}{file_suffix}.jpg"
                 
                 video_path = self.videos_dir / video_filename
                 thumbnail_path = self.thumbnails_dir / thumbnail_filename

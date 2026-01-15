@@ -33,15 +33,19 @@ def add_footer_to_post(content: str, parse_mode: str = "Markdown") -> str:
             footer = (
                 "\n\n"  # Пустая строка для разделения
                 '<b>📢 <a href="https://t.me/web3_moves">Web3 Moves</a>\n\n'
+                '📺 <a href="https://www.youtube.com/@web3moves">YouTube</a> | '
                 '🤖 <a href="https://t.me/SyntraAI_bot?startapp=web3">Крипто ИИ</a> | '
-                '💬 <a href="https://t.me/+stbL19SueW40Nzk6">Чат</a></b>'
+                '💬 <a href="https://t.me/+stbL19SueW40Nzk6">Чат</a> | '
+                '🧑‍🧒‍🧒 <a href="https://t.me/web3movesbot?startapp">Реф. программа</a></b>'
             )
         else:  # Markdown по умолчанию
             footer = (
                 "\n\n"  # Пустая строка для разделения
                 "**📢 [Web3 Moves](https://t.me/web3_moves)\n\n"
+                "📺 [YouTube](https://www.youtube.com/@web3moves) | "
                 "🤖 [Крипто ИИ](https://t.me/SyntraAI_bot?startapp=web3) | "
-                "💬 [Чат](https://t.me/+stbL19SueW40Nzk6)**"
+                "💬 [Чат](https://t.me/+stbL19SueW40Nzk6) | "
+                "🧑‍🧒‍🧒 [Реф. программа](https://t.me/web3movesbot?startapp)**"
             )
 
         # Добавляем футер к контенту
@@ -117,6 +121,8 @@ def has_footer(content: str) -> bool:
             "📢 Web3 Moves",
             "t.me/web3_moves",
             "t.me/+stbL19SueW40Nzk6",
+            "youtube.com/@web3moves",
+            "t.me/web3movesbot?startapp",
             # Старые маркеры для совместимости
             "[Сигналы и аналитика от ИИ]",
             "t.me/SyntraAI_bot?startapp=web3",
@@ -165,12 +171,15 @@ def validate_footer_links() -> bool:
         # Ссылки, которые используются в футере
         links = [
             "https://t.me/web3_moves",
+            "https://www.youtube.com/@web3moves",
+            "https://t.me/SyntraAI_bot?startapp=web3",
             "https://t.me/+stbL19SueW40Nzk6",
+            "https://t.me/web3movesbot?startapp",
         ]
 
-        # Проверяем формат ссылок
+        # Проверяем формат ссылок (Telegram или YouTube)
         for link in links:
-            if not link.startswith("https://t.me/"):
+            if not (link.startswith("https://t.me/") or link.startswith("https://www.youtube.com/")):
                 logger.error("Некорректная ссылка в футере: {}", link)
                 return False
 

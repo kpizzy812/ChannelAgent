@@ -88,10 +88,11 @@ class SyntraClient:
                         )
                         return None
 
-                    elif response.status == 503:
+                    elif response.status in (502, 503, 504):
+                        # Серверные ошибки - retry
                         logger.warning(
-                            "⚠️ SyntraAI временно недоступен (503), попытка {}/{}",
-                            attempt, self.max_retries
+                            "⚠️ SyntraAI временно недоступен ({}), попытка {}/{}",
+                            response.status, attempt, self.max_retries
                         )
                     else:
                         error_text = await response.text()

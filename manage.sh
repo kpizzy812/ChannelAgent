@@ -37,6 +37,7 @@ show_menu() {
     echo -e "${GREEN}6.${NC} 📥 Синхронизация с сервера"
     echo -e "${GREEN}7.${NC} 📋 Статус агента"
     echo -e "${GREEN}8.${NC} 💾 Бэкап базы данных"
+    echo -e "${GREEN}9.${NC} 🔄 Восстановление БД из бэкапа"
     echo -e "${RED}0.${NC} ❌ Выход"
     echo ""
     echo -ne "${YELLOW}Введите номер: ${NC}"
@@ -387,7 +388,7 @@ backup_database() {
     # Формируем имя файла с датой и временем
     TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
     BACKUP_NAME="agent_db_${TIMESTAMP}.sqlite"
-    REMOTE_DB_PATH="/home/agent/data/agent.db"
+    REMOTE_DB_PATH="/home/agent/data/channel_agent.db"
 
     echo -e "${CYAN}📦 Создаю бэкап на сервере...${NC}"
 
@@ -459,6 +460,161 @@ ENDSSH
     read -p "Нажмите Enter для продолжения..."
 }
 
+# Функция восстановления базы данных из бэкапа
+restore_database() {
+    echo -e "\n${BLUE}🔄 Восстановление базы данных из бэкапа...${NC}"
+
+    LOCAL_BACKUP_DIR="./backups"
+    REMOTE_DB_PATH="/home/agent/data/channel_agent.db"
+
+    # Проверяем наличие бэкапов
+    if [ ! -d "${LOCAL_BACKUP_DIR}" ] || [ -z "$(ls -A ${LOCAL_BACKUP_DIR}/*.sqlite 2>/dev/null)" ]; then
+        echo -e "${RED}❌ Бэкапы не найдены в ${LOCAL_BACKUP_DIR}${NC}"
+        echo -e "${YELLOW}💡 Сначала создайте бэкап (пункт 8)${NC}"
+        read -p "Нажмите Enter для продолжения..."
+        return
+    fi
+
+    # Показываем список бэкапов
+    echo -e "${CYAN}📋 Доступные бэкапы:${NC}"
+    echo ""
+
+    # Создаем массив файлов
+    BACKUPS=()
+    i=1
+    for backup in $(ls -t ${LOCAL_BACKUP_DIR}/*.sqlite 2>/dev/null); do
+        BACKUPS+=("$backup")
+        FILENAME=$(basename "$backup")
+        SIZE=$(du -h "$backup" | cut -f1)
+        DATE=$(echo "$FILENAME" | sed 's/agent_db_\([0-9]*\)_\([0-9]*\).sqlite/\1 \2/' | sed 's/\([0-9]\{4\}\)\([0-9]\{2\}\)\([0-9]\{2\}\) \([0-9]\{2\}\)\([0-9]\{2\}\)\([0-9]\{2\}\)/\1-\2-\3 \4:\5:\6/')
+        echo -e "${GREEN}${i}.${NC} ${FILENAME} (${SIZE}) - ${DATE}"
+        ((i++))
+    done
+
+    echo -e "${RED}0.${NC} Отмена"
+    echo ""
+    echo -ne "${YELLOW}Выберите бэкап для восстановления: ${NC}"
+    read -r choice
+
+    if [ "$choice" == "0" ] || [ -z "$choice" ]; then
+        echo -e "${YELLOW}Отмена операции${NC}"
+        read -p "Нажмите Enter для продолжения..."
+        return
+    fi
+
+    # Проверяем корректность выбора
+    if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt ${#BACKUPS[@]} ]; then
+        echo -e "${RED}❌ Неверный выбор${NC}"
+        read -p "Нажмите Enter для продолжения..."
+        return
+    fi
+
+    SELECTED_BACKUP="${BACKUPS[$((choice-1))]}"
+    BACKUP_FILENAME=$(basename "$SELECTED_BACKUP")
+
+    echo ""
+    echo -e "${YELLOW}⚠️  ВНИМАНИЕ! Эта операция:${NC}"
+    echo -e "  • Остановит агента"
+    echo -e "  • Создаст бэкап текущей БД"
+    echo -e "  • Заменит БД на: ${BACKUP_FILENAME}"
+    echo -e "  • Перезапустит агента"
+    echo ""
+    echo -ne "${RED}Вы уверены? (да/нет): ${NC}"
+    read -r confirm
+
+    if [ "$confirm" != "да" ] && [ "$confirm" != "yes" ] && [ "$confirm" != "y" ]; then
+        echo -e "${YELLOW}Отмена операции${NC}"
+        read -p "Нажмите Enter для продолжения..."
+        return
+    fi
+
+    echo ""
+    echo -e "${CYAN}🔄 Начинаю восстановление...${NC}"
+
+    # 1. Остановка агента
+    echo -e "${CYAN}⏹️  Останавливаю агента...${NC}"
+    ssh ${SERVER} << 'ENDSSH'
+        cd /home/agent
+        PIDS=$(pgrep -f "python.*main.py")
+        if [ ! -z "$PIDS" ]; then
+            echo "$PIDS" | while read pid; do
+                kill $pid 2>/dev/null
+            done
+            sleep 3
+            # Force kill если не остановился
+            REMAINING=$(pgrep -f "python.*main.py")
+            if [ ! -z "$REMAINING" ]; then
+                echo "$REMAINING" | while read pid; do
+                    kill -9 $pid 2>/dev/null
+                done
+            fi
+        fi
+        rm -f agent.pid
+ENDSSH
+
+    # 2. Создаем бэкап текущей БД на сервере
+    echo -e "${CYAN}💾 Создаю бэкап текущей БД перед заменой...${NC}"
+    TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+    ssh ${SERVER} "cp ${REMOTE_DB_PATH} ${REMOTE_DB_PATH}.before_restore_${TIMESTAMP} 2>/dev/null || echo 'БД не существует'"
+
+    # 3. Загружаем бэкап на сервер
+    echo -e "${CYAN}📤 Загружаю бэкап на сервер...${NC}"
+    scp "${SELECTED_BACKUP}" ${SERVER}:/tmp/restore_db.sqlite
+
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}❌ Ошибка загрузки бэкапа на сервер!${NC}"
+        read -p "Нажмите Enter для продолжения..."
+        return
+    fi
+
+    # 4. Заменяем БД
+    echo -e "${CYAN}🔄 Заменяю базу данных...${NC}"
+    ssh ${SERVER} << ENDSSH
+        cd /home/agent
+        mkdir -p data
+        mv /tmp/restore_db.sqlite ${REMOTE_DB_PATH}
+        chmod 644 ${REMOTE_DB_PATH}
+        echo "✅ База данных заменена"
+        ls -lh ${REMOTE_DB_PATH}
+ENDSSH
+
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}❌ Ошибка замены БД!${NC}"
+        read -p "Нажмите Enter для продолжения..."
+        return
+    fi
+
+    # 5. Запрос на перезапуск агента
+    echo ""
+    echo -ne "${YELLOW}Запустить агента? (да/нет): ${NC}"
+    read -r start_agent
+
+    if [ "$start_agent" == "да" ] || [ "$start_agent" == "yes" ] || [ "$start_agent" == "y" ]; then
+        echo -e "${CYAN}▶️  Запускаю агента...${NC}"
+        ssh ${SERVER} << 'ENDSSH'
+            cd /home/agent
+            source .venv/bin/activate
+            nohup python3 main.py > agent.log 2>&1 &
+            AGENT_PID=$!
+            echo $AGENT_PID > agent.pid
+            sleep 3
+            if ps -p $AGENT_PID > /dev/null; then
+                echo "✅ Агент запущен с PID: $AGENT_PID"
+            else
+                echo "❌ Ошибка запуска агента"
+                tail -10 agent.log
+            fi
+ENDSSH
+    fi
+
+    echo ""
+    echo -e "${GREEN}✅ Восстановление завершено!${NC}"
+    echo -e "${CYAN}📁 Использован бэкап: ${BACKUP_FILENAME}${NC}"
+    echo -e "${YELLOW}💡 Старая БД сохранена как: channel_agent.db.before_restore_${TIMESTAMP}${NC}"
+
+    read -p "Нажмите Enter для продолжения..."
+}
+
 # Главный цикл программы
 main() {
     while true; do
@@ -491,12 +647,15 @@ main() {
             8)
                 backup_database
                 ;;
+            9)
+                restore_database
+                ;;
             0)
                 echo -e "\n${GREEN}👋 До свидания!${NC}"
                 exit 0
                 ;;
             *)
-                echo -e "\n${RED}❌ Неверный выбор. Пожалуйста, выберите число от 0 до 8.${NC}"
+                echo -e "\n${RED}❌ Неверный выбор. Пожалуйста, выберите число от 0 до 9.${NC}"
                 sleep 2
                 ;;
         esac
